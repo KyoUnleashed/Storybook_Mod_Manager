@@ -1,6 +1,11 @@
 # Storybook-Mod-Manager
-A Mod Manager designed for the Sonic Storybook Games, here lies the 
-source code, this entire script was made in Python, PyQt5, def easier
+
+ DISCLAIMER: THIS MOD MANAGER WAS CREATED WITH THE ASSISTANCE OF AI's SUCH AS COPILOT, CHATGPT, CLAUDE AI, etc. While most of the code was written in AI to help with complex functions I simply couldn't understand. Do keep in mind that I had to manually edit large parts of the code by hand. AI isn't perfect. I know. 
+ 
+ Also, this Mod manager will probably flag the .py script as a virus, Exclude it from the antivirus, since it's not a virus (whole mod manager is coded in PyQt5, along with AI.
+
+## A Mod Manager designed for the Sonic Storybook Games
+Here lies the source code, this entire script was made in Python - PyQt5, def easier
 than my other alternative (Tkinter) which I had used for the Sword Master GUI Tool
 
 Made by Me, KyoUnleashed

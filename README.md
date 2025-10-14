@@ -1,4 +1,4 @@
-# Storybook-Mod-Manager
+# Storybook Mod Manager
 
  DISCLAIMER: THIS MOD MANAGER WAS CREATED WITH THE ASSISTANCE OF AI's SUCH AS COPILOT, CHATGPT, CLAUDE AI, etc. While most of the code was written in AI to help with complex functions I simply couldn't understand. Do keep in mind that I had to manually edit large parts of the code by hand. AI isn't perfect. I know. 
  

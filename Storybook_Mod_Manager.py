@@ -342,6 +342,33 @@ class GameWindowMonitor(QThread):
                 return
             time.sleep(1)
 
+# Helper for detecting mod is png only
+def _mod_is_png_only(mod_folder: Path) -> bool:
+        """
+        Return True if this mod folder contains ONLY PNG files (besides mod.ini, mod_data.json).
+        This indicates it's a texture pack mod that needs Dolphin Custom Texture Path.
+        """
+        try:
+            has_png = False
+            has_other = False
+
+            for dirpath, _, filenames in os.walk(mod_folder):
+                for fname in filenames:
+                    # Skip metadata files
+                    if fname in ("mod.ini", "mod_data.json", "config_schema.json", 
+                               "config.json", "config_schema_files.json", 
+                               "preview.png", "file_mappings.json", "packed_files.bin"):
+                        continue
+                    
+                    ext = Path(fname).suffix.lower()
+                    if ext == ".png":
+                        has_png = True
+                    elif ext:  # Has extension but not PNG
+                        has_other = True
+
+            return has_png and not has_other
+        except Exception:
+            return False
 
 # Helper for the SBButton class, for the windows to change the mouse to L-Shape that isn't the main window
 def handify_buttons_in(widget):
@@ -594,7 +621,12 @@ def ensure_settings():
 
     # Initialize game records
     for pretty, key in GAME_KEYS.items():
-        s["games"].setdefault(key, {"vanilla": "", "mods": "", "dolphin_shortcut": ""})
+        s["games"].setdefault(key, {
+            "vanilla": "",
+            "mods": "",
+            "dolphin_shortcut": "",
+            "dolphin_texture_path": ""  # NEW: Add dolphin texture path
+        })
         if newly_created:
             default_mods = _default_mods_dir(pretty)
             s["games"][key]["mods"] = str(default_mods)
@@ -3303,9 +3335,20 @@ class ConfigureModSchemaDialog(QDialog):
             QMessageBox.information(self, "No choice", "Select a dropdown and choice first.")
             return
 
+        # NEW: Check if this is a PNG-only mod
+        is_png_only = _mod_is_png_only(self.mod_folder)
+
+        # Adjust file dialog filter based on mod type
+        if is_png_only:
+            file_filter = "PNG Textures (*.png);;All Files (*)"
+            dialog_title = "Select PNG texture(s) for this choice (will target Dolphin Custom Texture Path)"
+        else:
+            file_filter = "All Files (*)"
+            dialog_title = "Select mod file(s) for this choice (will be packed on Save)"
+
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Select mod file(s) for this choice (will be packed on Save)",
-            str(Path.home()), "All Files (*)"
+            self, dialog_title,
+            str(Path.home()), file_filter
         )
         if not files:
             return
@@ -3334,6 +3377,16 @@ class ConfigureModSchemaDialog(QDialog):
 
             # Prompt for renames (existing dialog)
             dlg = RenameChoiceFilesDialog(self, self.attachments, dd, ch)
+
+            # NEW: Update the dialog prompt if PNG-only
+            if is_png_only:
+                try:
+                    for lbl in dlg.findChildren(QLabel):
+                        if "target filenames" in lbl.text().lower():
+                            lbl.setText("Edit target texture names (these will go to Dolphin Custom Texture Path)")
+                except Exception:
+                    pass
+                
             if dlg.exec_() != QDialog.Accepted:
                 # Roll back staged items on cancel
                 for fm in temp_files:
@@ -3348,7 +3401,8 @@ class ConfigureModSchemaDialog(QDialog):
                 self._refresh_choice_summary_and_preview()
                 return
 
-            QMessageBox.information(self, "Staged", f"Mapped {len(temp_files)} file(s) for choice '{ch}'. They will be saved on Save.")
+            file_type = "texture(s)" if is_png_only else "file(s)"
+            QMessageBox.information(self, "Staged", f"Mapped {len(temp_files)} {file_type} for choice '{ch}'. They will be saved on Save.")
             self._refresh_choice_summary_and_preview()
         except Exception as e:
             QMessageBox.warning(self, "Pack failed", f"Could not stage files: {e}")
@@ -5222,7 +5276,6 @@ class SettingsDialog(QDialog):
         # Quit Dolphin with Storybook Game checkbox (default ON)
         self.quit_dolphin_cb = QCheckBox("Quit Dolphin with Storybook Game")
         self.quit_dolphin_cb.setChecked(bool(s.get("quit_dolphin_with_game", True)))
-        # Row for the checkbox
         quit_row = QHBoxLayout()
         quit_row.addWidget(self.quit_dolphin_cb)
         quit_row.addStretch()
@@ -5236,14 +5289,34 @@ class SettingsDialog(QDialog):
 
         help_row = QHBoxLayout()
         help_row.addWidget(self.btn_help_setup)
-        layout.addSpacing(2)  # spacing before the button
+        layout.addSpacing(2)
         layout.addLayout(help_row)
 
+        # NEW: Bottom row with Dolphin Texture Packs button and Save/Cancel
+        bottom_row = QHBoxLayout()
+        
+        # Dolphin Texture Packs button (left side, with icon)
+        self.btn_dolphin_textures = SBButton("  Dolphin Texture Packs")
+        dolphin_icon_path = UI_DIR / "Dolphin Icon.png"
+        if dolphin_icon_path.exists():
+            self.btn_dolphin_textures.setIcon(QIcon(str(dolphin_icon_path)))
+            self.btn_dolphin_textures.setIconSize(QSize(20, 20))
+        self.btn_dolphin_textures.setMinimumHeight(38)
+        self.btn_dolphin_textures.setMinimumWidth(94)
+        hook_flash(self.btn_dolphin_textures)
+        self.btn_dolphin_textures.clicked.connect(self._on_dolphin_textures_clicked)
+        bottom_row.addWidget(self.btn_dolphin_textures)
+        
+        bottom_row.addStretch(1)
+        
+        # Save/Cancel buttons (right side)
         btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         beef_up_buttons(btns)
         btns.accepted.connect(self.do_save)
         btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
+        bottom_row.addWidget(btns)
+        
+        layout.addLayout(bottom_row)
 
         self.setStyleSheet("""
             QLineEdit, QTextEdit, QComboBox {
@@ -5311,6 +5384,29 @@ class SettingsDialog(QDialog):
         parent = self.parentWidget()
         if parent and hasattr(parent, "show_help_setup"):
             parent.show_help_setup()
+
+    def _on_dolphin_textures_clicked(self):
+        # Close settings dialog and open texture packs dialog
+        self.accept()  # Close settings dialog
+
+        # Open the Dolphin Texture Packs dialog
+        dlg = DolphinTexturePackDialog(self.parent)
+        try:
+            self.parent._handify_buttons(dlg)
+        except Exception:
+            pass
+        
+        result = dlg.exec_()
+
+        # If user clicked "Back", reopen settings dialog
+        if hasattr(dlg, '_back_clicked') and dlg._back_clicked:
+            # Reopen settings dialog
+            settings_dlg = SettingsDialog(self.parent)
+            try:
+                self.parent._handify_buttons(settings_dlg)
+            except Exception:
+                pass
+            settings_dlg.exec_()
 
 # -----------------------
 # Help Setup Dialog Class, for the help button
@@ -5753,6 +5849,186 @@ class UnsavedChangesDialog(QDialog):
     def _on_clicked(self, button):
         self.clicked_button = button
         self.accept()   # ensures the dialog closes properly
+
+# -----------------------
+# DolphinTexturePackDialog - Configure Dolphin Custom Texture Path
+# -----------------------
+class DolphinTexturePackDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent_ui = parent
+        self._back_clicked = False  # For going back to the settings window
+        self.setWindowTitle("Dolphin Texture Packs")
+        self.resize(620, 460)  # Made bigger for 2 game sections
+
+        s = load_settings()
+
+        layout = QVBoxLayout(self)
+
+        # === SECRET RINGS SECTION ===
+        sr_banner_path = UI_DIR / "Secret Rings - Setting Texture Pack.png"
+        if not sr_banner_path.exists():
+            sr_banner_path = find_settings_overview_banner("Secret Rings")
+        
+        if sr_banner_path and sr_banner_path.exists():
+            sr_banner_lbl = QLabel()
+            sr_banner_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+            sr_banner_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            sr_banner_pix = QPixmap(str(sr_banner_path)).scaledToHeight(79, Qt.SmoothTransformation)
+            sr_banner_lbl.setPixmap(sr_banner_pix)
+            layout.addWidget(sr_banner_lbl)
+        else:
+            # Fallback: game name header
+            sr_hdr = QHBoxLayout()
+            sr_icon_path = find_ui_icon("secretrings", "Settings")
+            sr_icon_lbl = QLabel()
+            if sr_icon_path and Path(sr_icon_path).exists():
+                sr_pix = QPixmap(str(sr_icon_path)).scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                sr_icon_lbl.setPixmap(sr_pix)
+            sr_name_lbl = QLabel("Secret Rings")
+            sr_name_lbl.setStyleSheet("font-size: 18px; font-weight: 700;")
+            sr_name_lbl.setAlignment(Qt.AlignCenter)
+            sr_hdr.addWidget(sr_icon_lbl)
+            sr_hdr.addWidget(sr_name_lbl, 1, Qt.AlignCenter)
+            layout.addLayout(sr_hdr)
+
+        # Text field for Secret Rings
+        current_sr_path = s.get("games", {}).get("SecretRings", {}).get("dolphin_texture_path", "")
+        self.sr_texture_path_edit = QLineEdit(current_sr_path)
+        self.sr_texture_path_edit.setMinimumHeight(34)
+        self._row(layout, "Set Dolphin Custom Texture Path", self.sr_texture_path_edit, 
+                  lambda: self._browse_folder(self.sr_texture_path_edit, "Secret Rings"))
+
+        # === BLACK KNIGHT SECTION ===
+        bk_banner_path = UI_DIR / "Black Knight - Setting Texture Pack.png"
+        if not bk_banner_path.exists():
+            bk_banner_path = find_settings_overview_banner("Black Knight")
+        
+        if bk_banner_path and bk_banner_path.exists():
+            bk_banner_lbl = QLabel()
+            bk_banner_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+            bk_banner_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            bk_banner_pix = QPixmap(str(bk_banner_path)).scaledToHeight(79, Qt.SmoothTransformation)
+            bk_banner_lbl.setPixmap(bk_banner_pix)
+            layout.addSpacing(50)
+            layout.addWidget(bk_banner_lbl)
+        else:
+            # Fallback: game name header
+            bk_hdr = QHBoxLayout()
+            bk_icon_path = find_ui_icon("blackknight", "Settings")
+            bk_icon_lbl = QLabel()
+            if bk_icon_path and Path(bk_icon_path).exists():
+                bk_pix = QPixmap(str(bk_icon_path)).scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                bk_icon_lbl.setPixmap(bk_pix)
+            bk_name_lbl = QLabel("Black Knight")
+            bk_name_lbl.setStyleSheet("font-size: 18px; font-weight: 700;")
+            bk_name_lbl.setAlignment(Qt.AlignCenter)
+            bk_hdr.addWidget(bk_icon_lbl)
+            bk_hdr.addWidget(bk_name_lbl, 1, Qt.AlignCenter)
+            layout.addLayout(bk_hdr)
+
+        # Text field for Black Knight
+        current_bk_path = s.get("games", {}).get("BlackKnight", {}).get("dolphin_texture_path", "")
+        self.bk_texture_path_edit = QLineEdit(current_bk_path)
+        self.bk_texture_path_edit.setMinimumHeight(34)
+        self._row(layout, "Set Dolphin Custom Texture Path", self.bk_texture_path_edit, 
+                  lambda: self._browse_folder(self.bk_texture_path_edit, "Black Knight"))
+
+        layout.addStretch(1)
+
+        # How to Setup Custom Textures button (bottom-left, stretches horizontally)
+        self.btn_help_setup = SBButton("How to Setup Custom Textures?")
+        self.btn_help_setup.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self.btn_help_setup.setMinimumHeight(33)
+        self.btn_help_setup.clicked.connect(self._on_help_setup_clicked)
+
+        help_row = QHBoxLayout()
+        help_row.addWidget(self.btn_help_setup, 1)  # stretch=1 makes it expand horizontally
+        layout.addLayout(help_row)
+
+        # Save/Back buttons
+        btns = QDialogButtonBox()
+        save_btn = btns.addButton("Save", QDialogButtonBox.AcceptRole)
+        back_btn = btns.addButton("Back", QDialogButtonBox.RejectRole)
+        beef_up_buttons(btns)
+        btns.accepted.connect(self.do_save)
+        btns.rejected.connect(self.on_back)
+        layout.addWidget(btns)
+
+        self.setStyleSheet("""
+            QLineEdit, QTextEdit, QComboBox {
+                background-color: #1A1A1A; color: #E6E6E6; border: 1px solid #333;
+            }
+            QPushButton:pressed { background-color: rgba(255,255,255,0.2); }
+        """)
+
+    def _row(self, parent_layout, label, edit: QLineEdit, browse_cb):
+        row = QHBoxLayout()
+        lab = QLabel(label)
+        lab.setStyleSheet("font-size: 14px;")
+        row.addWidget(lab)
+        edit.setMinimumWidth(280)
+        edit.setMinimumHeight(34)
+        row.addWidget(edit, 1)
+        btn = QPushButton("Browse…")
+        btn.setMinimumHeight(42)
+        hook_flash(btn)
+        btn.clicked.connect(browse_cb)
+        row.addWidget(btn)
+        parent_layout.addLayout(row)
+
+    def _browse_folder(self, edit_widget, game_name):
+        path = QFileDialog.getExistingDirectory(
+            self, f"Select Dolphin Custom Texture Folder ({game_name})",
+            edit_widget.text() or str(Path.home())
+        )
+        if path:
+            edit_widget.setText(path)
+
+    def do_save(self):
+        s = load_settings()
+        s["games"].setdefault("SecretRings", {})
+        s["games"]["SecretRings"]["dolphin_texture_path"] = self.sr_texture_path_edit.text()
+        
+        s["games"].setdefault("BlackKnight", {})
+        s["games"]["BlackKnight"]["dolphin_texture_path"] = self.bk_texture_path_edit.text()
+        
+        save_settings(s)
+        QMessageBox.information(self, "Saved", "Dolphin Custom Texture Paths saved successfully!")
+        self.accept()
+
+    def on_back(self):
+        """Handle Back button click - mark that we're going back to settings."""
+        self._back_clicked = True
+        self.reject()
+
+    def _on_help_setup_clicked(self):
+        # Dolphin texture setup help slides
+        slides = [
+            (
+                "Step 1: Find your Game ID by Right-Click > Properties, than go to the Info tab.",
+                resource_path("UI/help/CustomTextures/DolphinStep1.gif")
+            ),
+            (
+                "Step 2: Go to your 'Load' > Textures and make a folder with the name of your Game ID.",
+                resource_path("UI/help/CustomTextures/DolphinStep2.gif")
+            ),
+            (
+                "Step 3: Set your Load > Textures > [Game ID] Folder to the Settings Window",
+                resource_path("UI/help/CustomTextures/DolphinStep3.gif")
+            ),
+            (
+                "Step 4: Enable the 'Load Custom Textures Option' In the Dolphin Graphics Settings (Advanced Tab)",
+                resource_path("UI/help/CustomTextures/DolphinStep4.gif")
+            ),
+            (
+                "End: Now you have Custom Textures!.",
+                resource_path("UI/help/CustomTextures/Custom Textures Compare.gif")
+            ),
+        ]
+
+        dlg = HelpSetupDialog(self, slides=slides)
+        dlg.exec_()
 
 # -----------------------
 # Storybook main UI
@@ -6837,29 +7113,66 @@ class StorybookUI(QWidget):
         Apply enabled mods into the game's vanilla tree.
         - If the mod has at least one dropdown = 'Enabled': backup/replace and record APPLIED FILES.
         - If the mod has all dropdowns 'Disabled' (or no config): restore originals and save the pruned archive.
+        - NEW: PNG-only mods require Dolphin Custom Texture Path to be set.
         """
         enabled = self.get_enabled_mods()
         game_key = GAME_KEYS[self.current_game]
-    
+
         # Guardrail: settings must be valid before applying
         if not settings_ready_for_game(self.settings, game_key):
             QMessageBox.warning(self, "Configure your settings!", "You must configure your settings before launching this game.")
             return False
-    
+
         gconf = self.settings["games"].get(game_key, {})
         vanilla = Path(gconf.get("vanilla") or "")
+        dolphin_texture_path_str = gconf.get("dolphin_texture_path", "")
+        dolphin_texture_path = Path(dolphin_texture_path_str) if dolphin_texture_path_str and dolphin_texture_path_str.strip() else None
+
         if not vanilla.exists():
             QMessageBox.warning(self, "Missing Game Files", "Set Game Files (vanilla) in Settings first.")
             return False
-    
+
+        # NEW: Check for PNG-only mods without Dolphin texture path configured
+        for m in enabled:
+            mod_path = Path(m['path'])
+            is_texture_pack = _mod_is_png_only(mod_path)
+
+            if is_texture_pack:
+                # Check if texture path is set and valid
+                texture_path_str = gconf.get("dolphin_texture_path", "")
+
+                if not texture_path_str or not texture_path_str.strip():
+                    QMessageBox.warning(
+                        self, 
+                        "Dolphin Texture Path Required",
+                        f"The mod '{m.get('name', mod_path.name)}' contains only PNG textures.\n\n"
+                        "Please configure the Dolphin Custom Texture Path in Settings:\n"
+                        "Settings > Dolphin Texture Packs"
+                    )
+                    return False
+
+                test_path = Path(texture_path_str)
+                if not test_path.exists():
+                    QMessageBox.warning(
+                        self, 
+                        "Dolphin Texture Path Invalid",
+                        f"The mod '{m.get('name', mod_path.name)}' requires a valid Dolphin Custom Texture Path.\n\n"
+                        f"The configured path does not exist:\n{texture_path_str}\n\n"
+                        "Please update it in Settings > Dolphin Texture Packs"
+                    )
+                    return False
+
         valid_game_dirs = {p.name for p in vanilla.iterdir() if p.is_dir()}
         archive = load_archive(game_key)
-    
+
         for m in enabled:
             mod_path = Path(m['path'])
             mod_name = m.get('name', mod_path.name)
             self.log(f"[surgical] applying mod {mod_name}")
-    
+
+            # Check if this is a PNG-only (texture pack) mod
+            is_texture_pack = _mod_is_png_only(mod_path)
+
             # --- Load unified mod_data.json (cfg, schema, attachments) ---
             cfg, schema, attachments = {}, {}, {}
             data_file = mod_path / "mod_data.json"
@@ -6886,25 +7199,82 @@ class StorybookUI(QWidget):
                         attachments = json.loads(attachp.read_text(encoding="utf-8")) or {}
                     except Exception:
                         attachments = {}
-    
-            # --- Determine if this mod should apply or restore based on dropdowns ---
+
+    # --- Determine if this mod should apply or restore based on dropdowns ---
             has_enabled_choice = any(
                 isinstance(v, str) and v.strip().lower() == "enabled"
                 for v in (cfg or {}).values()
             )
-    
+
+            # NEW: For PNG-only mods without config, treat as "enabled" (apply textures)
+            if is_texture_pack and not cfg:
+                has_enabled_choice = True
+                self.log(f"[surgical] {mod_name} is a texture pack without config, applying all PNGs")
+
+            # NEW: Handle "Disabled" choices for texture packs (restore/delete those specific textures)
+            if is_texture_pack and cfg:
+                for keyname, chosen in (cfg or {}).items():
+                    if not isinstance(chosen, str):
+                        continue
+                    if chosen.strip().lower() == "disabled":
+                        # This choice is disabled, restore/delete its textures
+                        entry = attachments.get(keyname, {}).get(chosen, {})
+                        if entry:
+                            files_to_restore = []
+                            for fm in entry.get("files", []):
+                                dst_name = fm.get("dst")
+                                if dst_name:
+                                    files_to_restore.append(dst_name)
+
+                            # Also check Enabled entry for this dropdown (since we're switching away from it)
+                            enabled_entry = attachments.get(keyname, {}).get("Enabled", {})
+                            if enabled_entry:
+                                for fm in enabled_entry.get("files", []):
+                                    dst_name = fm.get("dst")
+                                    if dst_name:
+                                        files_to_restore.append(dst_name)
+
+                            # Restore or delete each file
+                            for dst_name in files_to_restore:
+                                dst = dolphin_texture_path / dst_name
+                                rel_key = f"texture::{Path(dst_name).as_posix()}"
+
+                                if rel_key in archive:
+                                    # Restore from backup
+                                    try:
+                                        dst.parent.mkdir(parents=True, exist_ok=True)
+                                        dst.write_bytes(archive[rel_key])
+                                        self.log(f"[restore] Restored texture {dst_name} (dropdown disabled)")
+                                        del archive[rel_key]
+                                    except Exception as e:
+                                        self.log(f"[restore] Failed to restore texture {dst_name}: {e}")
+                                else:
+                                    # No backup, delete it
+                                    try:
+                                        if dst.exists():
+                                            dst.unlink()
+                                            self.log(f"[restore] Deleted mod-added texture {dst_name} (dropdown disabled)")
+                                    except Exception as e:
+                                        self.log(f"[restore] Failed to delete texture {dst_name}: {e}")
+
             if not has_enabled_choice:
-                # All choices disabled → restore and save the pruned archive
-                restored = restore_files_for_mod(mod_path, game_key, vanilla, log_fn=self.log)
-                if restored:
-                    self.log(f"[apply] {mod_name}: all choices Disabled → restored {len(restored)} file(s)")
-                    # ⚡ KEY FIX: reload the archive after restoration (it was pruned inside restore_files_for_mod)
-                    archive = load_archive(game_key)
+                # All choices disabled → restore
+                if is_texture_pack:
+                    # Restore from dolphin texture archive
+                    restored = self._restore_dolphin_textures(mod_path, game_key, dolphin_texture_path)
+                    if restored:
+                        self.log(f"[apply] {mod_name}: texture pack disabled → restored {len(restored)} texture(s)")
+                else:
+                    # Normal game file restore
+                    restored = restore_files_for_mod(mod_path, game_key, vanilla, log_fn=self.log)
+                    if restored:
+                        self.log(f"[apply] {mod_name}: all choices Disabled → restored {len(restored)} file(s)")
+                        archive = load_archive(game_key)
                 continue
             
             # ---- Otherwise, proceed with application for Enabled state ----
             touched = []
-    
+
             # --- file_mappings.json (explicit mappings) ---
             mapping = {}
             mapping_p = mod_path / "file_mappings.json"
@@ -6913,7 +7283,7 @@ class StorybookUI(QWidget):
                     mapping = json.loads(mapping_p.read_text(encoding="utf-8"))
                 except Exception:
                     mapping = {}
-    
+
             # --- Handle packed mappings in file_mappings.json ---
             try:
                 packed_index = _sb_read_packed_index(mod_path)
@@ -6925,55 +7295,96 @@ class StorybookUI(QWidget):
                             if not tmp or not tmp.exists():
                                 self.log(f"[surgical] packed source missing: {packed_name}")
                                 return False
-                            dst = self._resolve_vanilla_target(vanilla, target_name or packed_name)
-                            dst.parent.mkdir(parents=True, exist_ok=True)
-                            rel_dst = dst.relative_to(vanilla)
-                            if dst.exists():
-                                if not backup_and_replace_file_to_archive(dst, tmp, game_key, vanilla, archive, log_fn=self.log):
-                                    return False
+
+                            # NEW: Route to texture path if PNG-only mod
+                            if is_texture_pack:
+                                dst = dolphin_texture_path / (target_name or packed_name)
+                                dst.parent.mkdir(parents=True, exist_ok=True)
+                                rel_dst = dst.relative_to(dolphin_texture_path)
+                                if dst.exists():
+                                    if not self._backup_and_replace_dolphin_texture(dst, tmp, game_key, dolphin_texture_path):
+                                        return False
+                                else:
+                                    shutil.copy2(tmp, dst)
+                                    self.log(f"[surgical] created texture {dst} (from packed)")
+                                touched.append(rel_dst.as_posix())
                             else:
-                                shutil.copy2(tmp, dst)
-                                self.log(f"[surgical] created {dst} (from packed)")
-                            touched.append(rel_dst.as_posix())
+                                # Normal game file path
+                                dst = self._resolve_vanilla_target(vanilla, target_name or packed_name)
+                                dst.parent.mkdir(parents=True, exist_ok=True)
+                                rel_dst = dst.relative_to(vanilla)
+                                if dst.exists():
+                                    if not backup_and_replace_file_to_archive(dst, tmp, game_key, vanilla, archive, log_fn=self.log):
+                                        return False
+                                else:
+                                    shutil.copy2(tmp, dst)
+                                    self.log(f"[surgical] created {dst} (from packed)")
+                                touched.append(rel_dst.as_posix())
                             del mapping[orig_rel]
             except Exception as e:
                 self.log(f"[surgical] error processing packed mapping: {e}")
                 return False
-    
-            # --- Walk mod files that mirror vanilla subfolders ---
+
+            # --- Walk mod files ---
             for dirpath, _, filenames in os.walk(mod_path, followlinks=True):
                 rel_dir = Path(dirpath).relative_to(mod_path)
-                if rel_dir.parts and rel_dir.parts[0] not in valid_game_dirs:
+
+                # Skip non-game directories for non-texture-pack mods
+                if not is_texture_pack and rel_dir.parts and rel_dir.parts[0] not in valid_game_dirs:
                     continue
                 
                 for fname in filenames:
                     if fname in ("packed_files.bin", "mod.ini", "config_schema.json",
                                  "config.json", "config_schema_files.json",
-                                 "preview.png", "file_mappings.json"):
+                                 "preview.png", "file_mappings.json", "mod_data.json"):
                         continue
                     
                     src = Path(dirpath) / fname
                     rel = (rel_dir / fname).as_posix() if str(rel_dir) != "." else fname
-    
-                    target_name = mapping.get(rel)
-                    if target_name:
-                        dst = self._resolve_vanilla_target(vanilla, target_name)
-                    else:
-                        candidate = vanilla / rel
-                        if not candidate.exists():
+
+                    # NEW: Handle texture pack files
+                    if is_texture_pack:
+                        # For texture packs, copy PNGs directly to dolphin texture path
+                        if src.suffix.lower() != ".png":
                             continue
-                        dst = candidate
-    
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    rel_dst = dst.relative_to(vanilla)
-                    if dst.exists():
-                        if not backup_and_replace_file_to_archive(dst, src, game_key, vanilla, archive, log_fn=self.log):
-                            return False
+                        
+                        target_name = mapping.get(rel, fname)
+                        dst = dolphin_texture_path / target_name
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+
+                        try:
+                            rel_dst = dst.relative_to(dolphin_texture_path)
+                        except ValueError:
+                            rel_dst = Path(target_name)
+
+                        if dst.exists():
+                            if not self._backup_and_replace_dolphin_texture(dst, src, game_key, dolphin_texture_path):
+                                return False
+                        else:
+                            shutil.copy2(src, dst)
+                            self.log(f"[surgical] created texture {dst}")
+                        touched.append(rel_dst.as_posix())
                     else:
-                        shutil.copy2(src, dst)
-                        self.log(f"[surgical] created {dst}")
-                    touched.append(rel_dst.as_posix())
-    
+                        # Normal game file handling
+                        target_name = mapping.get(rel)
+                        if target_name:
+                            dst = self._resolve_vanilla_target(vanilla, target_name)
+                        else:
+                            candidate = vanilla / rel
+                            if not candidate.exists():
+                                continue
+                            dst = candidate
+
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        rel_dst = dst.relative_to(vanilla)
+                        if dst.exists():
+                            if not backup_and_replace_file_to_archive(dst, src, game_key, vanilla, archive, log_fn=self.log):
+                                return False
+                        else:
+                            shutil.copy2(src, dst)
+                            self.log(f"[surgical] created {dst}")
+                        touched.append(rel_dst.as_posix())
+
             # --- Attachment handling (apply only for Enabled choices) ---
             for keyname, chosen in (cfg or {}).items():
                 if not isinstance(chosen, str) or not chosen:
@@ -7004,17 +7415,34 @@ class StorybookUI(QWidget):
                             self.log(f"[attach] attached source missing: {src_path}")
                             continue
                         
-                    dest_path = self._resolve_vanilla_target(vanilla, dst_name)
-                    dest_path.parent.mkdir(parents=True, exist_ok=True)
-                    rel_dst = dest_path.relative_to(vanilla)
-                    if dest_path.exists():
-                        if not backup_and_replace_file_to_archive(dest_path, src_path, game_key, vanilla, archive, log_fn=self.log):
-                            return False
+                    # NEW: Route to texture path if PNG and texture pack mod
+                    if is_texture_pack and src_path.suffix.lower() == ".png":
+                        dest_path = dolphin_texture_path / dst_name
+                        dest_path.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            rel_dst = dest_path.relative_to(dolphin_texture_path)
+                        except ValueError:
+                            rel_dst = Path(dst_name)
+                        if dest_path.exists():
+                            if not self._backup_and_replace_dolphin_texture(dest_path, src_path, game_key, dolphin_texture_path):
+                                return False
+                        else:
+                            shutil.copy2(src_path, dest_path)
+                            self.log(f"[attach] created texture {dest_path}")
+                        touched.append(rel_dst.as_posix())
                     else:
-                        shutil.copy2(src_path, dest_path)
-                        self.log(f"[attach] created {dest_path}")
-                    touched.append(rel_dst.as_posix())
-    
+                        # Normal game file
+                        dest_path = self._resolve_vanilla_target(vanilla, dst_name)
+                        dest_path.parent.mkdir(parents=True, exist_ok=True)
+                        rel_dst = dest_path.relative_to(vanilla)
+                        if dest_path.exists():
+                            if not backup_and_replace_file_to_archive(dest_path, src_path, game_key, vanilla, archive, log_fn=self.log):
+                                return False
+                        else:
+                            shutil.copy2(src_path, dest_path)
+                            self.log(f"[attach] created {dest_path}")
+                        touched.append(rel_dst.as_posix())
+
             # --- Write unified mod_data.json snapshot with APPLIED FILES ---
             unique_touched = sorted(set(touched))
             if unique_touched:
@@ -7027,7 +7455,7 @@ class StorybookUI(QWidget):
                     self.log(f"[applied] Writing {len(unique_touched)} touched files for {mod_name}: {unique_touched}")
                 except Exception as e:
                     self.log(f"[warn] could not write mod_data.json snapshot: {e}")
-            
+
         # Finalize archive once: delete if empty; write if non-empty
         save_archive(game_key, archive)
         self.log("[surgical] finished applying mods")
@@ -7047,7 +7475,7 @@ class StorybookUI(QWidget):
     def on_context_menu(self, pos):
         item = self.tree.itemAt(pos)
         menu = QMenu(self)
-    
+
         # Styling: hover "shine" that matches your dark theme
         menu.setStyleSheet("""
             QMenu {
@@ -7064,7 +7492,7 @@ class StorybookUI(QWidget):
                 color: #FFFFFF;
             }
         """)
-    
+
         # Small event filter to set pointing-hand only when hovering actions
         class _MenuHoverCursorFilter(QObject):
             def eventFilter(self, obj, ev):
@@ -7072,13 +7500,11 @@ class StorybookUI(QWidget):
                     if ev.type() in (QEvent.MouseMove, QEvent.HoverMove):
                         w = obj.childAt(ev.pos())
                         if w is not None:
-                            # if pointing at an action widget, set pointing-hand on that child
                             try:
                                 w.setCursor(Qt.PointingHandCursor)
                             except Exception:
                                 obj.setCursor(Qt.PointingHandCursor)
                         else:
-                            # fallback to setting the menu cursor if nothing specific found
                             try:
                                 obj.setCursor(Qt.PointingHandCursor)
                             except Exception:
@@ -7091,7 +7517,7 @@ class StorybookUI(QWidget):
                 except Exception:
                     pass
                 return super().eventFilter(obj, ev)
-    
+
         # Build menu actions
         if item:
             m = item.data(0, Qt.UserRole) or {}
@@ -7104,13 +7530,13 @@ class StorybookUI(QWidget):
                 act_author = menu.addAction("Go to Author Page")
             menu.addSeparator()
             act_delete = menu.addAction("Delete…")
-    
+
             # Install the hover filter and exec the menu
             f = _MenuHoverCursorFilter(menu)
             menu.installEventFilter(f)
             chosen = menu.exec_(self.tree.mapToGlobal(pos))
             menu.removeEventFilter(f)
-    
+
             # Action handling
             if chosen == act_config:
                 self.on_configure_mod(item)
@@ -7168,6 +7594,16 @@ class StorybookUI(QWidget):
                 self.load_game(self.current_game)
         except Exception as e:
             self.log(f"[error] edit mod: {e}")
+
+    def on_dolphin_texture_packs(self, item):
+        try:
+            m = item.data(0, Qt.UserRole)
+            game_key = GAME_KEYS[self.current_game]
+            dlg = DolphinTexturePackDialog(self, Path(m["path"]), game_key)
+            self._handify_buttons(dlg)
+            dlg.exec_()
+        except Exception as e:
+            self.log(f"[error] dolphin texture packs: {e}")
 
     def on_check_update(self, item):
         progress = UpdateProgressDialog(self)
@@ -7251,6 +7687,8 @@ class StorybookUI(QWidget):
         # Restore files for mods that were enabled before but are now disabled
         gconf = self.settings["games"].get(key, {})
         vanilla = Path(gconf.get("vanilla") or "")
+        dolphin_texture_path = Path(gconf.get("dolphin_texture_path") or "")
+        
         if not vanilla.exists():
             QMessageBox.warning(self, "Missing Game Files", "Set Game Files (vanilla) in Settings first.")
             return
@@ -7259,9 +7697,19 @@ class StorybookUI(QWidget):
         for pstr in to_restore:
             try:
                 mod_path = Path(pstr)
-                restored = restore_files_for_mod(mod_path, key, vanilla, log_fn=self.log)
-                if restored:
-                    self.log(f"[restore] Restored {len(restored)} file(s) for {mod_path.name}")
+                
+                # Check if it's a texture pack
+                if _mod_is_png_only(mod_path):
+                    # Restore/delete textures
+                    if dolphin_texture_path and dolphin_texture_path.exists():
+                        restored = self._restore_dolphin_textures(mod_path, key, dolphin_texture_path)
+                        if restored:
+                            self.log(f"[restore] Processed {len(restored)} texture(s) for {mod_path.name}")
+                else:
+                    # Normal game file restore
+                    restored = restore_files_for_mod(mod_path, key, vanilla, log_fn=self.log)
+                    if restored:
+                        self.log(f"[restore] Restored {len(restored)} file(s) for {mod_path.name}")
             except Exception as e:
                 self.log(f"[restore] failed for {pstr}: {e}")
 
@@ -7299,8 +7747,11 @@ class StorybookUI(QWidget):
                 if m:
                     now_enabled.add(str(Path(m["path"]).resolve()))
 
+        # Restore files for mods that were enabled before but are now disabled
         gconf = self.settings["games"].get(key, {})
         vanilla = Path(gconf.get("vanilla") or "")
+        dolphin_texture_path = Path(gconf.get("dolphin_texture_path") or "")
+        
         if not vanilla.exists():
             QMessageBox.warning(self, "Missing Game Files", "Set Game Files (vanilla) in Settings first.")
             return
@@ -7309,7 +7760,19 @@ class StorybookUI(QWidget):
         for pstr in to_restore:
             try:
                 mod_path = Path(pstr)
-                restore_files_for_mod(mod_path, key, vanilla, log_fn=self.log)
+                
+                # Check if it's a texture pack
+                if _mod_is_png_only(mod_path):
+                    # Restore/delete textures
+                    if dolphin_texture_path and dolphin_texture_path.exists():
+                        restored = self._restore_dolphin_textures(mod_path, key, dolphin_texture_path)
+                        if restored:
+                            self.log(f"[restore] Processed {len(restored)} texture(s) for {mod_path.name}")
+                else:
+                    # Normal game file restore
+                    restored = restore_files_for_mod(mod_path, key, vanilla, log_fn=self.log)
+                    if restored:
+                        self.log(f"[restore] Restored {len(restored)} file(s) for {mod_path.name}")
             except Exception as e:
                 self.log(f"[restore] failed for {pstr}: {e}")
 
@@ -7467,6 +7930,110 @@ class StorybookUI(QWidget):
             self._monitor.stop()
             self._monitor = None
 
+    def _backup_and_replace_dolphin_texture(self, original: Path, mod_file: Path, game_key: str, texture_root: Path) -> bool:
+        """
+        Backup and replace a Dolphin custom texture file.
+        Uses the same archive system as game files but with texture-specific keys.
+        """
+        archive = load_archive(game_key)
+
+        try:
+            rel_key = f"texture::{original.relative_to(texture_root).as_posix()}"
+        except Exception:
+            rel_key = f"texture::{original.name}"
+
+        if rel_key not in archive and original.exists():
+            try:
+                archive[rel_key] = original.read_bytes()
+                self.log(f"[backup] stored texture {rel_key} ({len(archive[rel_key])} bytes)")
+            except Exception as e:
+                self.log(f"[error] backup texture read failed {original}: {e}")
+                return False
+        elif rel_key in archive:
+            self.log(f"[backup] texture {rel_key} already backed up ({len(archive[rel_key])} bytes)")
+        else:
+            self.log(f"[backup] WARNING: texture {original} does not exist, cannot backup!")
+
+        try:
+            shutil.copy2(mod_file, original)
+            self.log(f"[replace] texture {mod_file} -> {original}")
+            save_archive(game_key, archive)
+            return True
+        except Exception as e:
+            self.log(f"[error] copy texture failed {mod_file} -> {original}: {e}")
+            return False
+
+    def _restore_dolphin_textures(self, mod_path: Path, game_key: str, texture_root: Path) -> list:
+        """
+        Restore original Dolphin textures for a mod, similar to restore_files_for_mod.
+        If no backup exists for a texture, delete it (it was added by the mod).
+        """
+        archive = load_archive(game_key)
+        self.log(f"[restore] Loading texture archive for {game_key}, found {len(archive)} backed up files")
+    
+        data_file = mod_path / "mod_data.json"
+        if not data_file.exists():
+            self.log(f"[restore] No mod_data.json for {mod_path.name}, nothing to restore")
+            return []
+    
+        try:
+            data = json.loads(data_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            self.log(f"[restore] Could not read mod_data.json: {e}")
+            return []
+    
+        applied = data.get("APPLIED FILES", [])
+        if not applied:
+            self.log(f"[restore] No applied textures recorded for {mod_path.name}")
+            return []
+    
+        restored = []
+        deleted = []
+        
+        for rel in applied:
+            rel_key = f"texture::{Path(rel).as_posix()}"
+            dst = texture_root / rel
+            
+            # Check if we have a backup for this texture
+            if rel_key in archive:
+                # Backup exists → restore it
+                try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_bytes(archive[rel_key])
+                    restored.append(rel)
+                    self.log(f"[restore] Restored texture {rel}")
+                    del archive[rel_key]
+                except Exception as e:
+                    self.log(f"[restore] Failed to restore texture {rel}: {e}")
+            else:
+                # No backup → this texture was added by the mod, delete it
+                try:
+                    if dst.exists():
+                        dst.unlink()
+                        deleted.append(rel)
+                        self.log(f"[restore] Deleted mod-added texture {rel}")
+                    else:
+                        self.log(f"[restore] Texture {rel} already gone")
+                except Exception as e:
+                    self.log(f"[restore] Failed to delete texture {rel}: {e}")
+    
+        # Save pruned archive
+        save_archive(game_key, archive)
+    
+        # Clear APPLIED FILES
+        try:
+            data["APPLIED FILES"] = []
+            data_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            self.log(f"[restore] Failed to update mod_data.json: {e}")
+    
+        if restored:
+            self.log(f"[restore] Restored {len(restored)} texture(s) from backup")
+        if deleted:
+            self.log(f"[restore] Deleted {len(deleted)} mod-added texture(s)")
+    
+        return restored + deleted
+
     def _list_dolphin_pids(self):
         """
         Return a set of PIDs for running Dolphin.exe processes using tasklist.
@@ -7517,8 +8084,12 @@ class StorybookUI(QWidget):
                 resource_path("UI/help/Step4.gif")
             ),
             (
-                "Step 5: You're Done! You can now Use the Mod Manager 😎",
-                resource_path("UI/help/Step5.jpg")
+                "Step 5: Set your Game Files and Shortcut Accordingly",
+                resource_path("UI/help/Step5.gif")
+            ),
+            (
+                "End: You're Done! You can now Use the Mod Manager",
+                resource_path("UI/help/Step6.jpg")
             ),
         ]
 

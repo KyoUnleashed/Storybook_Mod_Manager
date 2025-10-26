@@ -485,7 +485,6 @@ def _sb_extract_packed_to_temp(mod_folder: Path, name: str) -> Path:
     except Exception:
         return None
 
-
 # Essentially updating (Copilot says populating) mod_data.json
 def write_mod_data_snapshot(mod_folder: Path,
                             schema: dict = None,
@@ -526,7 +525,7 @@ APP_VERSION = "1"
 APP_AUTHOR = "KyoUnleashed"
 
 # Set this to the raw URL of the latest script to enable self-update detection (not shown in UI).
-MANAGER_UPDATE_URL = ""  # e.g., "https://raw.githubusercontent.com/your/repo/main/storybook_mod_manager.py"
+MANAGER_UPDATE_URL = "https://gamebanana.com/tools/20945"  # e.g., "https://gamebanana.com/mods/whaatever"
 
 # Handle PyInstaller executable vs script mode
 if getattr(sys, 'frozen', False):
@@ -677,7 +676,8 @@ INI_DEFAULTS = {
     "Date": "",
     "ID": "",
     "IncludeDirectories": "",
-    "Dependencies": ""
+    "Dependencies": "",
+    "TexturePackMode": ""  # "copy" or "move"
 }
 
 def ensure_mod_ini(mod_folder: Path):
@@ -5850,6 +5850,257 @@ class UnsavedChangesDialog(QDialog):
         self.clicked_button = button
         self.accept()   # ensures the dialog closes properly
 
+# ---------------------------------------
+# TexturePackModeRequiredDialog – warns user to configure texture pack mode
+# ---------------------------------------
+class TexturePackModeRequiredDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Texture Pack Mode Required")
+        self.setModal(True)
+        self.resize(420, 180)
+
+        # Play Windows error sound
+        QApplication.beep()
+
+        layout = QVBoxLayout(self)
+
+        # Headline
+        headline = QLabel(
+            "<span style='font-size:14pt; font-weight:600;'>"
+            "Please Configure Texture Pack Mode</span>"
+        )
+        headline.setAlignment(Qt.AlignCenter)
+        headline.setStyleSheet("background: transparent;")
+        layout.addWidget(headline)
+
+        # Message
+        message = QLabel(
+            "You must enable one of the options (Copy or Move)\n"
+            "in the Dolphin Texture Pack Config window\n"
+            "before applying this texture pack mod."
+        )
+        message.setAlignment(Qt.AlignCenter)
+        message.setStyleSheet("font-size: 12pt; padding: 12px; background: transparent;")
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setAlignment(Qt.AlignCenter)
+
+        self.settings_btn = QPushButton("Go to Settings")
+        self.cancel_btn = QPushButton("Cancel")
+
+        self.settings_btn.setMinimumSize(140, 40)
+        self.cancel_btn.setMinimumSize(100, 40)
+
+        self.settings_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+
+        btn_layout.addWidget(self.settings_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.clicked_button = None
+        self.settings_btn.clicked.connect(lambda: self._on_clicked(self.settings_btn))
+        self.cancel_btn.clicked.connect(lambda: self._on_clicked(self.cancel_btn))
+
+        self.setStyleSheet("""
+            QDialog { background-color: #1A1A1A; }
+            QLabel { color: #E6E6E6; }
+            QPushButton {
+                background-color: #2A2A2A;
+                color: #E6E6E6;
+                border: 1px solid #444;
+                border-radius: 4px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255,255,255,0.15);
+            }
+            QPushButton:pressed {
+                background-color: rgba(255,255,255,0.25);
+            }
+        """)
+
+    def _on_clicked(self, button):
+        self.clicked_button = button
+        self.accept()
+
+# -----------------------
+# DolphinTexturePackConfigDialog - CONTEXT MENU Configure copy/move mode for texture packs
+# -----------------------
+class DolphinTexturePackConfigDialog(QDialog):
+    def __init__(self, parent, mod_folder: Path):
+        super().__init__(parent)
+        self.setWindowTitle("Dolphin Texture Pack Config")
+        self.resize(480, 280)
+        self.mod_folder = mod_folder
+        self.parent_ui = parent
+
+        # Read current setting from mod.ini
+        cp, ini, _ = ensure_mod_ini(mod_folder)
+        current_mode = cp.get(INI_SECTION, "TexturePackMode", fallback="copy")
+
+        layout = QVBoxLayout(self)
+
+        # Info label
+        info = QLabel(
+            "<b>Configure Texture Pack Mode</b><br><br>"
+            "Choose how this texture pack's PNG files are handled:"
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("font-size: 14px;")
+        layout.addWidget(info)
+
+        # Radio buttons for copy/move
+        self.radio_copy = QCheckBox("Copy PNGs to Dolphin Custom Texture Path")
+        self.radio_copy.setStyleSheet("font-size: 13px; padding: 8px;")
+        self.radio_copy.setToolTip("Copies texture files (keeps originals in mod folder)")
+        
+        self.radio_move = QCheckBox("Move PNGs to Dolphin Custom Texture Path")
+        self.radio_move.setStyleSheet("font-size: 13px; padding: 8px;")
+        self.radio_move.setToolTip("Moves texture files (saves disk space, removes from mod folder)")
+
+        # Make them mutually exclusive
+        self.radio_copy.toggled.connect(lambda checked: self.radio_move.setChecked(not checked) if checked else None)
+        self.radio_move.toggled.connect(lambda checked: self.radio_copy.setChecked(not checked) if checked else None)
+
+        # Set initial state - both unchecked if no mode set
+        self.initial_mode = current_mode
+        if current_mode == "move":
+            self.radio_move.setChecked(True)
+            self.radio_copy.setChecked(False)
+        elif current_mode == "copy":
+            self.radio_copy.setChecked(True)
+            self.radio_move.setChecked(False)
+        else:
+            # Both unchecked - user must choose
+            self.radio_copy.setChecked(False)
+            self.radio_move.setChecked(False)
+
+        layout.addWidget(self.radio_copy)
+        layout.addWidget(self.radio_move)
+
+        # Warning label
+        warning = QLabel(
+            "<i>Note: If you choose 'Move', the PNG files will be removed from the mod folder "
+            "and placed in your Dolphin Custom Texture Path. If you switch back to 'Copy', "
+            "the textures will be copied back to the mod folder.</i>"
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("color: #FFA500; font-size: 12px; padding: 8px;")
+        layout.addWidget(warning)
+
+        layout.addStretch(1)
+
+        # Buttons
+        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        beef_up_buttons(btns)
+        btns.accepted.connect(self.on_save)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        self.setStyleSheet("""
+            QLineEdit, QTextEdit, QComboBox {
+                background-color: #1A1A1A; color: #E6E6E6; border: 1px solid #333;
+            }
+            QCheckBox {
+                color: #E6E6E6;
+            }
+            QPushButton:pressed { background-color: rgba(255,255,255,0.2); }
+        """)
+        handify_buttons_in(self)
+
+    def on_save(self):
+        try:
+            # Validate that user selected an option
+            if not self.radio_copy.isChecked() and not self.radio_move.isChecked():
+                QMessageBox.warning(
+                    self,
+                    "Selection Required",
+                    "Please select either 'Copy' or 'Move' mode before saving."
+                )
+                return
+
+            cp, ini, _ = ensure_mod_ini(self.mod_folder)
+
+            new_mode = "move" if self.radio_move.isChecked() else "copy"
+
+            # If switching from move to copy, copy textures back to mod folder
+            if self.initial_mode == "move" and new_mode == "copy":
+                self._copy_textures_back_to_mod()
+
+            # Save the new mode
+            cp.set(INI_SECTION, "TexturePackMode", new_mode)
+
+            with ini.open("w", encoding="utf-8") as f:
+                cp.write(f)
+
+            QMessageBox.information(
+                self, 
+                "Saved", 
+                "Texture pack mode saved successfully!\n\n"
+                "This setting will be applied the next time you Save/Apply mods."
+            )
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed", f"Could not save texture pack config:\n{e}")
+
+    def _copy_textures_back_to_mod(self):
+        """Copy moved textures back to the mod folder from Dolphin texture path"""
+        try:
+            # Get dolphin texture path from settings
+            game_key = GAME_KEYS[self.parent_ui.current_game]
+            settings = load_settings()
+            dolphin_texture_path_str = settings.get("games", {}).get(game_key, {}).get("dolphin_texture_path", "")
+            
+            if not dolphin_texture_path_str:
+                self.parent_ui.log(f"[texture_restore] No Dolphin texture path configured")
+                return
+            
+            dolphin_texture_path = Path(dolphin_texture_path_str)
+            if not dolphin_texture_path.exists():
+                self.parent_ui.log(f"[texture_restore] Dolphin texture path does not exist")
+                return
+            
+            # Read applied files from mod_data.json
+            data_file = self.mod_folder / "mod_data.json"
+            if not data_file.exists():
+                self.parent_ui.log(f"[texture_restore] No mod_data.json found")
+                return
+            
+            try:
+                data = json.loads(data_file.read_text(encoding="utf-8"))
+                applied = data.get("APPLIED FILES", [])
+                
+                if not applied:
+                    self.parent_ui.log(f"[texture_restore] No applied files to restore")
+                    return
+                
+                restored_count = 0
+                for rel in applied:
+                    texture_file = dolphin_texture_path / rel
+                    if texture_file.exists() and texture_file.suffix.lower() == ".png":
+                        # Copy back to mod folder
+                        dest = self.mod_folder / texture_file.name
+                        try:
+                            shutil.copy2(texture_file, dest)
+                            restored_count += 1
+                            self.parent_ui.log(f"[texture_restore] Copied back {texture_file.name}")
+                        except Exception as e:
+                            self.parent_ui.log(f"[texture_restore] Failed to copy {texture_file.name}: {e}")
+                
+                if restored_count > 0:
+                    self.parent_ui.log(f"[texture_restore] Copied {restored_count} texture(s) back to mod folder")
+                    
+            except Exception as e:
+                self.parent_ui.log(f"[texture_restore] Error reading mod_data.json: {e}")
+                
+        except Exception as e:
+            self.parent_ui.log(f"[texture_restore] Error: {e}")
+
 # -----------------------
 # DolphinTexturePackDialog - Configure Dolphin Custom Texture Path
 # -----------------------
@@ -6006,15 +6257,15 @@ class DolphinTexturePackDialog(QDialog):
         # Dolphin texture setup help slides
         slides = [
             (
-                "Step 1: Find your Game ID by Right-Click > Properties, than go to the Info tab.",
+                "Step 1: Find your Game ID from your Modified Game by Right-Click > Properties, than go to the Info tab.",
                 resource_path("UI/help/CustomTextures/DolphinStep1.gif")
             ),
             (
-                "Step 2: Go to your 'Load' > Textures and make a folder with the name of your Game ID.",
+                "Step 2: Go to your 'Load' > Textures and Create a folder with the name of your Game ID.",
                 resource_path("UI/help/CustomTextures/DolphinStep2.gif")
             ),
             (
-                "Step 3: Set your Load > Textures > [Game ID] Folder to the Settings Window",
+                "Step 3: Set your Load > Textures > [Game ID] Folder paths to the Settings Window (Do the same for Both)",
                 resource_path("UI/help/CustomTextures/DolphinStep3.gif")
             ),
             (
@@ -6022,7 +6273,7 @@ class DolphinTexturePackDialog(QDialog):
                 resource_path("UI/help/CustomTextures/DolphinStep4.gif")
             ),
             (
-                "End: Now you have Custom Textures!.",
+                "End: Now you have Custom Textures!",
                 resource_path("UI/help/CustomTextures/Custom Textures Compare.gif")
             ),
         ]
@@ -6328,7 +6579,7 @@ class StorybookUI(QWidget):
                 if mod != 0:
                     mods.append(mod)
 
-            # Existing update check logic
+            # Check mod updates
             for mod in mods:
                 try:
                     current_ver = mod.get("version")
@@ -6347,17 +6598,41 @@ class StorybookUI(QWidget):
                 except Exception as e:
                     print(f"Error checking {mod.get('name','Unknown')}: {e}")
 
-            # Manager self‑update check (keep your existing code here if needed)
+            # NEW: Manager self-update check using GameBanana
+            if MANAGER_UPDATE_URL:
+                try:
+                    self.log("[update] Checking Mod Manager for updates...")
+                    latest_ver, latest_title = get_latest_version_and_title(MANAGER_UPDATE_URL)
+
+                    if latest_ver:
+                        current_manager_ver = APP_VERSION
+                        if compare_versions(current_manager_ver, latest_ver) < 0:
+                            updates.insert(0, {  # Insert at top so it shows first
+                                "name": "Storybook Mod Manager",
+                                "current": current_manager_ver,
+                                "latest": latest_ver,
+                                "url": MANAGER_UPDATE_URL
+                            })
+                            self.log(f"[update] Manager update available: {current_manager_ver} -> {latest_ver}")
+                        else:
+                            self.log(f"[update] Manager is up to date (v{current_manager_ver})")
+                    else:
+                        self.log("[update] Could not detect manager version from GameBanana")
+                except Exception as e:
+                    self.log(f"[update] Manager update check failed: {e}")
 
             progress.accept()  # close progress dialog
-            dlg = UpdateCheckDialog(updates, self)
-            handify_buttons_in(dlg)  # keep your helper
-            dlg.exec_()
+
+            if updates:
+                dlg = UpdateCheckDialog(updates, self)
+                handify_buttons_in(dlg)
+                dlg.exec_()
+            else:
+                QMessageBox.information(self, "Up to Date", "All mods and the Mod Manager are up to date!")
 
         # Run after dialog shows
         QTimer.singleShot(50, run)
         progress.exec_()
-
 
     # --- Logs ---
     def toggle_logs(self):
@@ -6779,6 +7054,28 @@ class StorybookUI(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Open Configure Menu", f"Could not open Configure Mod Menu:\n{e}")
 
+    # Updates the Conext menu to fallback to the mod_data.json to see if it was a texture pack mod or not (if user has moved)
+    def _is_texture_pack_via_applied_files(self, mod_folder: Path) -> bool:
+        """
+        Fallback detection: check if mod_data.json has APPLIED FILES with .png extensions.
+        This catches texture packs where PNGs have already been moved to Dolphin path.
+        """
+        try:
+            data_file = mod_folder / "mod_data.json"
+            if not data_file.exists():
+                return False
+            
+            data = json.loads(data_file.read_text(encoding="utf-8"))
+            applied = data.get("APPLIED FILES", [])
+            
+            if not applied:
+                return False
+            
+            # Check if any applied file is a PNG
+            return any(str(f).lower().endswith(".png") for f in applied)
+        except Exception:
+            return False
+
     # --- Mods list population ---
     def load_game(self, name):
         """
@@ -7172,6 +7469,16 @@ class StorybookUI(QWidget):
 
             # Check if this is a PNG-only (texture pack) mod
             is_texture_pack = _mod_is_png_only(mod_path)
+            
+            # Get texture pack mode from mod.ini
+            texture_pack_mode = "copy"  # default
+            if is_texture_pack:
+                try:
+                    cp, _, _ = ensure_mod_ini(mod_path)
+                    texture_pack_mode = cp.get(INI_SECTION, "TexturePackMode", fallback="copy")
+                except Exception:
+                    texture_pack_mode = "copy"
+                self.log(f"[surgical] {mod_name} texture pack mode: {texture_pack_mode}")
 
             # --- Load unified mod_data.json (cfg, schema, attachments) ---
             cfg, schema, attachments = {}, {}, {}
@@ -7234,7 +7541,7 @@ class StorybookUI(QWidget):
                                     if dst_name:
                                         files_to_restore.append(dst_name)
 
-                            # Restore or delete each file
+                            # Restore or delete each file, and if move mode, copy back to mod folder
                             for dst_name in files_to_restore:
                                 dst = dolphin_texture_path / dst_name
                                 rel_key = f"texture::{Path(dst_name).as_posix()}"
@@ -7249,9 +7556,17 @@ class StorybookUI(QWidget):
                                     except Exception as e:
                                         self.log(f"[restore] Failed to restore texture {dst_name}: {e}")
                                 else:
-                                    # No backup, delete it
+                                    # No backup, delete from dolphin path
                                     try:
                                         if dst.exists():
+                                            # If move mode, copy back to mod folder before deleting
+                                            if texture_pack_mode == "move":
+                                                try:
+                                                    mod_dest = mod_path / dst.name
+                                                    shutil.copy2(dst, mod_dest)
+                                                    self.log(f"[restore] Copied texture {dst.name} back to mod folder (disabled)")
+                                                except Exception as copy_err:
+                                                    self.log(f"[restore] Failed to copy back {dst.name}: {copy_err}")
                                             dst.unlink()
                                             self.log(f"[restore] Deleted mod-added texture {dst_name} (dropdown disabled)")
                                     except Exception as e:
@@ -7260,6 +7575,9 @@ class StorybookUI(QWidget):
             if not has_enabled_choice:
                 # All choices disabled → restore
                 if is_texture_pack:
+                    # If move mode, copy textures back to mod folder first
+                    if texture_pack_mode == "move":
+                        self._restore_dolphin_textures(mod_path, game_key, dolphin_texture_path)
                     # Restore from dolphin texture archive
                     restored = self._restore_dolphin_textures(mod_path, game_key, dolphin_texture_path)
                     if restored:
@@ -7361,8 +7679,13 @@ class StorybookUI(QWidget):
                             if not self._backup_and_replace_dolphin_texture(dst, src, game_key, dolphin_texture_path):
                                 return False
                         else:
-                            shutil.copy2(src, dst)
-                            self.log(f"[surgical] created texture {dst}")
+                            # Use copy or move based on texture pack mode
+                            if texture_pack_mode == "move":
+                                shutil.move(str(src), str(dst))
+                                self.log(f"[surgical] moved texture {src} -> {dst}")
+                            else:
+                                shutil.copy2(src, dst)
+                                self.log(f"[surgical] copied texture {src} -> {dst}")
                         touched.append(rel_dst.as_posix())
                     else:
                         # Normal game file handling
@@ -7427,8 +7750,13 @@ class StorybookUI(QWidget):
                             if not self._backup_and_replace_dolphin_texture(dest_path, src_path, game_key, dolphin_texture_path):
                                 return False
                         else:
-                            shutil.copy2(src_path, dest_path)
-                            self.log(f"[attach] created texture {dest_path}")
+                            # Use copy or move based on texture pack mode
+                            if texture_pack_mode == "move":
+                                shutil.move(str(src_path), str(dest_path))
+                                self.log(f"[attach] moved texture {src_path} -> {dest_path}")
+                            else:
+                                shutil.copy2(src_path, dest_path)
+                                self.log(f"[attach] copied texture {src_path} -> {dest_path}")
                         touched.append(rel_dst.as_posix())
                     else:
                         # Normal game file
@@ -7521,44 +7849,124 @@ class StorybookUI(QWidget):
         # Build menu actions
         if item:
             m = item.data(0, Qt.UserRole) or {}
-            act_config = menu.addAction("Configure Mod…")
-            act_edit   = menu.addAction("Edit Mod…")
-            act_open   = menu.addAction("Open Folder")
-            act_update = menu.addAction("Check for Update")
-            act_author = None
-            if m.get("author_url"):
-                act_author = menu.addAction("Go to Author Page")
-            menu.addSeparator()
-            act_delete = menu.addAction("Delete…")
-
-            # Install the hover filter and exec the menu
-            f = _MenuHoverCursorFilter(menu)
-            menu.installEventFilter(f)
-            chosen = menu.exec_(self.tree.mapToGlobal(pos))
-            menu.removeEventFilter(f)
-
-            # Action handling
-            if chosen == act_config:
-                self.on_configure_mod(item)
-            elif chosen == act_edit:
-                self.on_edit_mod(item)
-            elif chosen == act_open:
-                try:
-                    os.startfile(str(m["path"]))
-                except Exception as e:
-                    self.log(f"[error] open folder: {e}")
-            elif chosen == act_update:
-                self.on_check_update(item)
-            elif act_author and chosen == act_author:
-                try:
-                    webbrowser.open(m.get("author_url"))
-                except Exception:
+            mod_path = Path(m.get("path", ""))
+            is_texture_pack = (_mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)) if mod_path.exists() else False
+            
+            # Different menu for texture packs vs regular mods
+            if is_texture_pack:
+                # Redefine Dolphin icon for this context with size control
+                dolphin_icon_path = UI_DIR / "Dolphin Icon.png"
+                
+                if dolphin_icon_path.exists():
+                    # Load the original pixmap
+                    original_pixmap = QPixmap(str(dolphin_icon_path))
+                    
+                    # Create a larger pixmap
+                    large_pixmap = original_pixmap.scaled(
+                        100, 100,  # Adjust size as needed
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation
+                    )
+                    
+                    # Create icon from the large pixmap
+                    large_icon = QIcon(large_pixmap)
+                    
+                    # Globally set icon size for menus (if needed)
+                    QApplication.instance().setStyleSheet("""
+                        QMenu::icon {
+                            min-width: 50px;
+                            min-height: 50px;
+                        }
+                    """)
+                    
+                    # Texture pack specific option first
+                    act_texture_config = menu.addAction(large_icon, " Dolphin Texture Pack Config...")
+                else:
+                    # Fallback if icon doesn't exist
+                    act_texture_config = menu.addAction(" Dolphin Texture Pack Config...")
+                
+                menu.addSeparator()
+                # Keep all the standard options
+                act_config = menu.addAction("Configure Mod…")
+                act_edit   = menu.addAction("Edit Mod…")
+                act_open   = menu.addAction("Open Folder")
+                act_update = menu.addAction("Check for Update")
+                act_author = None
+                if m.get("author_url"):
+                    act_author = menu.addAction("Go to Author Page")
+                menu.addSeparator()
+                act_delete = menu.addAction("Delete…")
+                
+                # Install the hover filter and exec the menu
+                f = _MenuHoverCursorFilter(menu)
+                menu.installEventFilter(f)
+                chosen = menu.exec_(self.tree.mapToGlobal(pos))
+                menu.removeEventFilter(f)
+                
+                # Action handling - texture pack specific first
+                if chosen == act_texture_config:
+                    self.on_texture_pack_config(item)
+                elif chosen == act_config:
+                    self.on_configure_mod(item)
+                elif chosen == act_edit:
+                    self.on_edit_mod(item)
+                elif chosen == act_open:
                     try:
-                        os.startfile(m.get("author_url"))  # type: ignore
+                        os.startfile(str(m["path"]))
+                    except Exception as e:
+                        self.log(f"[error] open folder: {e}")
+                elif chosen == act_update:
+                    self.on_check_update(item)
+                elif act_author and chosen == act_author:
+                    try:
+                        webbrowser.open(m.get("author_url"))
                     except Exception:
-                        pass
-            elif chosen == act_delete:
-                self.on_delete_mod(item)
+                        try:
+                            os.startfile(m.get("author_url"))  # type: ignore
+                        except Exception:
+                            pass
+                elif chosen == act_delete:
+                    self.on_delete_mod(item)
+            else:
+                # Regular mod menu (unchanged)
+                act_config = menu.addAction("Configure Mod…")
+                act_edit   = menu.addAction("Edit Mod…")
+                act_open   = menu.addAction("Open Folder")
+                act_update = menu.addAction("Check for Update")
+                act_author = None
+                if m.get("author_url"):
+                    act_author = menu.addAction("Go to Author Page")
+                menu.addSeparator()
+                act_delete = menu.addAction("Delete…")
+
+                # Install the hover filter and exec the menu
+                f = _MenuHoverCursorFilter(menu)
+                menu.installEventFilter(f)
+                chosen = menu.exec_(self.tree.mapToGlobal(pos))
+                menu.removeEventFilter(f)
+
+                # Action handling
+                if chosen == act_config:
+                    self.on_configure_mod(item)
+                elif chosen == act_edit:
+                    self.on_edit_mod(item)
+                elif chosen == act_open:
+                    try:
+                        os.startfile(str(m["path"]))
+                    except Exception as e:
+                        self.log(f"[error] open folder: {e}")
+                elif chosen == act_update:
+                    self.on_check_update(item)
+                elif act_author and chosen == act_author:
+                    try:
+                        webbrowser.open(m.get("author_url"))
+                    except Exception:
+                        try:
+                            os.startfile(m.get("author_url"))  # type: ignore
+                        except Exception:
+                            pass
+                elif chosen == act_delete:
+                    self.on_delete_mod(item)
         else:
             # No item: show disabled placeholder with pointing-hand and shine
             placeholder = menu.addAction("(no mod selected)")
@@ -7567,6 +7975,15 @@ class StorybookUI(QWidget):
             menu.installEventFilter(f)
             menu.exec_(self.tree.mapToGlobal(pos))
             menu.removeEventFilter(f)
+
+    def on_texture_pack_config(self, item):
+            try:
+                m = item.data(0, Qt.UserRole)
+                dlg = DolphinTexturePackConfigDialog(self, Path(m["path"]))
+                self._handify_buttons(dlg)
+                dlg.exec_()
+            except Exception as e:
+                self.log(f"[error] texture pack config: {e}")
 
     def on_configure_mod(self, item):
         try:
@@ -7683,6 +8100,51 @@ class StorybookUI(QWidget):
                 m = it.data(0, Qt.UserRole)
                 if m:
                     now_enabled.add(str(Path(m["path"]).resolve()))
+        
+        # NEW: Check texture pack modes before applying
+        gconf = self.settings["games"].get(key, {})
+        dolphin_texture_path_str = gconf.get("dolphin_texture_path", "")
+
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            if it.checkState(0) == Qt.Checked:
+                m = it.data(0, Qt.UserRole)
+                if m:
+                    mod_path = Path(m["path"])
+                    is_texture_pack = _mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)
+
+                    if is_texture_pack:
+                        # Check if texture path is configured
+                        if not dolphin_texture_path_str or not dolphin_texture_path_str.strip():
+                            QMessageBox.warning(
+                                self,
+                                "Dolphin Texture Path Required",
+                                f"The mod '{m.get('name', mod_path.name)}' is a texture pack.\n\n"
+                                "Please configure the Dolphin Custom Texture Path in Settings:\n"
+                                "Settings > Dolphin Texture Packs"
+                            )
+                            return
+
+                        # Check if texture pack mode is configured
+                        try:
+                            cp, _, _ = ensure_mod_ini(mod_path)
+                            texture_mode = cp.get(INI_SECTION, "TexturePackMode", fallback="")
+
+                            if not texture_mode or texture_mode.strip() == "":
+                                dlg = TexturePackModeRequiredDialog(self)
+                                self._handify_buttons(dlg)
+                                dlg.exec_()
+
+                                if dlg.clicked_button == dlg.settings_btn:
+                                    # Open the texture pack config dialog
+                                    config_dlg = DolphinTexturePackConfigDialog(self, mod_path)
+                                    self._handify_buttons(config_dlg)
+                                    config_dlg.exec_()
+
+                                # Abort save process regardless
+                                return
+                        except Exception as e:
+                            self.log(f"[texture_check] Error checking texture mode: {e}")
 
         # Restore files for mods that were enabled before but are now disabled
         gconf = self.settings["games"].get(key, {})
@@ -7695,12 +8157,14 @@ class StorybookUI(QWidget):
 
         to_restore = prev_enabled - now_enabled
         for pstr in to_restore:
+            mod_path = Path(pstr)
+            
+            # Check if it's a texture pack (including via applied files)
+            is_texture_pack = _mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)
+            
             try:
-                mod_path = Path(pstr)
-                
-                # Check if it's a texture pack
-                if _mod_is_png_only(mod_path):
-                    # Restore/delete textures
+                if is_texture_pack:
+                    # Restore/delete textures using dolphin path
                     if dolphin_texture_path and dolphin_texture_path.exists():
                         restored = self._restore_dolphin_textures(mod_path, key, dolphin_texture_path)
                         if restored:
@@ -7747,6 +8211,51 @@ class StorybookUI(QWidget):
                 if m:
                     now_enabled.add(str(Path(m["path"]).resolve()))
 
+        # NEW: Check texture pack modes before applying
+        gconf = self.settings["games"].get(key, {})
+        dolphin_texture_path_str = gconf.get("dolphin_texture_path", "")
+
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            if it.checkState(0) == Qt.Checked:
+                m = it.data(0, Qt.UserRole)
+                if m:
+                    mod_path = Path(m["path"])
+                    is_texture_pack = _mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)
+
+                    if is_texture_pack:
+                        # Check if texture path is configured
+                        if not dolphin_texture_path_str or not dolphin_texture_path_str.strip():
+                            QMessageBox.warning(
+                                self,
+                                "Dolphin Texture Path Required",
+                                f"The mod '{m.get('name', mod_path.name)}' is a texture pack.\n\n"
+                                "Please configure the Dolphin Custom Texture Path in Settings:\n"
+                                "Settings > Dolphin Texture Packs"
+                            )
+                            return
+
+                        # Check if texture pack mode is configured
+                        try:
+                            cp, _, _ = ensure_mod_ini(mod_path)
+                            texture_mode = cp.get(INI_SECTION, "TexturePackMode", fallback="")
+
+                            if not texture_mode or texture_mode.strip() == "":
+                                dlg = TexturePackModeRequiredDialog(self)
+                                self._handify_buttons(dlg)
+                                dlg.exec_()
+
+                                if dlg.clicked_button == dlg.settings_btn:
+                                    # Open the texture pack config dialog
+                                    config_dlg = DolphinTexturePackConfigDialog(self, mod_path)
+                                    self._handify_buttons(config_dlg)
+                                    config_dlg.exec_()
+
+                                # Abort save process regardless
+                                return
+                        except Exception as e:
+                            self.log(f"[texture_check] Error checking texture mode: {e}")
+
         # Restore files for mods that were enabled before but are now disabled
         gconf = self.settings["games"].get(key, {})
         vanilla = Path(gconf.get("vanilla") or "")
@@ -7758,12 +8267,14 @@ class StorybookUI(QWidget):
 
         to_restore = prev_enabled - now_enabled
         for pstr in to_restore:
+            mod_path = Path(pstr)
+            
+            # Check if it's a texture pack (including via applied files)
+            is_texture_pack = _mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)
+            
             try:
-                mod_path = Path(pstr)
-                
-                # Check if it's a texture pack
-                if _mod_is_png_only(mod_path):
-                    # Restore/delete textures
+                if is_texture_pack:
+                    # Restore/delete textures using dolphin path
                     if dolphin_texture_path and dolphin_texture_path.exists():
                         restored = self._restore_dolphin_textures(mod_path, key, dolphin_texture_path)
                         if restored:
@@ -7965,12 +8476,10 @@ class StorybookUI(QWidget):
 
     def _restore_dolphin_textures(self, mod_path: Path, game_key: str, texture_root: Path) -> list:
         """
-        Restore original Dolphin textures for a mod, similar to restore_files_for_mod.
-        If no backup exists for a texture, delete it (it was added by the mod).
+        Restore/remove Dolphin textures for a mod.
+        For texture packs: moves files back (move mode) or deletes them (copy mode).
+        Does NOT use backup archive for texture packs.
         """
-        archive = load_archive(game_key)
-        self.log(f"[restore] Loading texture archive for {game_key}, found {len(archive)} backed up files")
-    
         data_file = mod_path / "mod_data.json"
         if not data_file.exists():
             self.log(f"[restore] No mod_data.json for {mod_path.name}, nothing to restore")
@@ -7987,38 +8496,45 @@ class StorybookUI(QWidget):
             self.log(f"[restore] No applied textures recorded for {mod_path.name}")
             return []
     
-        restored = []
+        # Check if this is move mode
+        try:
+            cp, _, _ = ensure_mod_ini(mod_path)
+            texture_pack_mode = cp.get(INI_SECTION, "TexturePackMode", fallback="copy")
+        except Exception:
+            texture_pack_mode = "copy"
+    
+        self.log(f"[restore] Restoring texture pack in '{texture_pack_mode}' mode")
+    
         deleted = []
+        moved_back = []
         
         for rel in applied:
-            rel_key = f"texture::{Path(rel).as_posix()}"
+            # The texture file in Dolphin's path
             dst = texture_root / rel
             
-            # Check if we have a backup for this texture
-            if rel_key in archive:
-                # Backup exists → restore it
+            if texture_pack_mode == "move":
+                # Move it back to mod folder
                 try:
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    dst.write_bytes(archive[rel_key])
-                    restored.append(rel)
-                    self.log(f"[restore] Restored texture {rel}")
-                    del archive[rel_key]
+                    if dst.exists():
+                        mod_dest = mod_path / Path(rel).name
+                        shutil.move(str(dst), str(mod_dest))
+                        moved_back.append(rel)
+                        self.log(f"[restore] Moved texture {Path(rel).name} back to mod folder")
+                    else:
+                        self.log(f"[restore] Texture {rel} not found in Dolphin path (already moved?)")
                 except Exception as e:
-                    self.log(f"[restore] Failed to restore texture {rel}: {e}")
+                    self.log(f"[restore] Failed to move back texture {rel}: {e}")
             else:
-                # No backup → this texture was added by the mod, delete it
+                # Copy mode → just delete from Dolphin path
                 try:
                     if dst.exists():
                         dst.unlink()
                         deleted.append(rel)
-                        self.log(f"[restore] Deleted mod-added texture {rel}")
+                        self.log(f"[restore] Deleted texture {Path(rel).name} from Dolphin path")
                     else:
-                        self.log(f"[restore] Texture {rel} already gone")
+                        self.log(f"[restore] Texture {rel} already gone from Dolphin path")
                 except Exception as e:
                     self.log(f"[restore] Failed to delete texture {rel}: {e}")
-    
-        # Save pruned archive
-        save_archive(game_key, archive)
     
         # Clear APPLIED FILES
         try:
@@ -8027,12 +8543,54 @@ class StorybookUI(QWidget):
         except Exception as e:
             self.log(f"[restore] Failed to update mod_data.json: {e}")
     
-        if restored:
-            self.log(f"[restore] Restored {len(restored)} texture(s) from backup")
         if deleted:
-            self.log(f"[restore] Deleted {len(deleted)} mod-added texture(s)")
+            self.log(f"[restore] Deleted {len(deleted)} texture(s) from Dolphin path")
+        if moved_back:
+            self.log(f"[restore] Moved {len(moved_back)} texture(s) back to mod folder")
     
-        return restored + deleted
+        return deleted + moved_back
+
+    def _restore_moved_textures_to_mod(self, mod_path: Path, game_key: str, texture_root: Path):
+        """Move textures back to mod folder from Dolphin texture path when disabling (move mode only)"""
+        try:
+            data_file = mod_path / "mod_data.json"
+            if not data_file.exists():
+                self.log(f"[restore_moved] No mod_data.json for {mod_path.name}")
+                return
+
+            data = json.loads(data_file.read_text(encoding="utf-8"))
+            applied = data.get("APPLIED FILES", [])
+
+            if not applied:
+                self.log(f"[restore_moved] No applied files to restore for {mod_path.name}")
+                return
+
+            moved_count = 0
+            for rel in applied:
+                # The texture is currently in Dolphin's texture path
+                dolphin_texture_file = texture_root / rel
+
+                # We want to move it back to the mod folder
+                mod_dest = mod_path / Path(rel).name  # Just the filename, not the full path
+
+                if dolphin_texture_file.exists() and dolphin_texture_file.suffix.lower() == ".png":
+                    try:
+                        # Move from Dolphin path back to mod folder (not copy!)
+                        shutil.move(str(dolphin_texture_file), str(mod_dest))
+                        moved_count += 1
+                        self.log(f"[restore_moved] Moved {dolphin_texture_file.name} from Dolphin path back to mod folder")
+                    except Exception as e:
+                        self.log(f"[restore_moved] Failed to move {dolphin_texture_file.name}: {e}")
+                else:
+                    self.log(f"[restore_moved] Texture not found in Dolphin path: {dolphin_texture_file}")
+
+            if moved_count > 0:
+                self.log(f"[restore_moved] Moved {moved_count} texture(s) back to mod folder from Dolphin path")
+            else:
+                self.log(f"[restore_moved] No textures were moved back (either missing or already restored)")
+
+        except Exception as e:
+            self.log(f"[restore_moved] Error: {e}")
 
     def _list_dolphin_pids(self):
         """

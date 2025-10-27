@@ -7724,11 +7724,43 @@ class StorybookUI(QWidget):
                 isinstance(v, str) and v.strip().lower() == "enabled"
                 for v in (cfg or {}).values()
             )
-
+            
             # NEW: If no config exists at all, treat mod as "enabled" (apply its files)
             if not cfg and not schema and not attachments:
                 has_enabled_choice = True
                 self.log(f"[surgical] {mod_name} has no config, applying all files")
+            
+            # NEW: If config exists but is set to Disabled, DON'T skip root files
+            # Only skip if we're in restore mode (previously had files applied)
+            if not has_enabled_choice:
+                data_file = mod_path / "mod_data.json"
+                previously_applied = False
+                if data_file.exists():
+                    try:
+                        data = json.loads(data_file.read_text(encoding="utf-8"))
+                        previously_applied = bool(data.get("APPLIED FILES", []))
+                    except Exception:
+                        pass
+                    
+                if previously_applied:
+                    # This mod was previously applied, now disabled → restore
+                    if is_texture_pack:
+                        if texture_pack_mode == "move":
+                            self._restore_dolphin_textures(mod_path, game_key, dolphin_texture_path)
+                        restored = self._restore_dolphin_textures(mod_path, game_key, dolphin_texture_path)
+                        if restored:
+                            self.log(f"[apply] {mod_name}: texture pack disabled → restored {len(restored)} texture(s)")
+                    else:
+                        restored = restore_files_for_mod(mod_path, game_key, vanilla, log_fn=self.log)
+                        if restored:
+                            self.log(f"[apply] {mod_name}: all choices Disabled → restored {len(restored)} file(s)")
+                            archive = load_archive(game_key)
+                    continue
+                else:
+                    # No previous application, and disabled → treat as "has no meaningful config"
+                    # (i.e., apply root files if they exist)
+                    has_enabled_choice = True
+                    self.log(f"[surgical] {mod_name}: config disabled but no previous application, applying root files")
 
             # NEW: For PNG-only mods without config, treat as "enabled" (apply textures)
             if is_texture_pack and not cfg:

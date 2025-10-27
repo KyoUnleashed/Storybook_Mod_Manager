@@ -5779,6 +5779,126 @@ class ConfirmDeleteDialog(QDialog):
         handify_buttons_in(self)
 
 # ---------------------------------------
+# Conflicted mods (with another) warning popup window.
+# ---------------------------------------
+class ConflictWarningDialog(QDialog):
+    def __init__(self, parent, conflicts: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Mod File Conflicts Detected")
+        self.setModal(True)
+        self.resize(600, 400)
+        
+        layout = QVBoxLayout(self)
+        
+        # Play Windows error sound
+        QApplication.beep()
+
+        # Headline
+        headline = QLabel(
+            "<span style='font-size:16pt; font-weight:600; color:#FF6B6B;'>"
+            "⚠ Warning: File Conflicts Detected</span>"
+        )
+        headline.setAlignment(Qt.AlignCenter)
+        layout.addWidget(headline)
+        
+        # Explanation
+        info = QLabel(
+            "Multiple enabled mods are trying to modify the same file(s).\n"
+            "If you continue, only the FIRST mod listed will be applied for each conflict."
+        )
+        info.setWordWrap(True)
+        info.setAlignment(Qt.AlignCenter)
+        info.setStyleSheet("font-size: 12pt; padding: 10px;")
+        layout.addWidget(info)
+        
+        # Scrollable conflict list
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        
+        conflict_container = QWidget()
+        conflict_layout = QVBoxLayout(conflict_container)
+        
+        for filename, mod_list in conflicts.items():
+            # File header
+            file_label = QLabel(f"<b>File: {filename}</b>")
+            file_label.setStyleSheet("color: #FFD700; font-size: 13pt; padding-top: 8px;")
+            conflict_layout.addWidget(file_label)
+            
+            # Mod list
+            for i, (mod_name, choice) in enumerate(mod_list):
+                prefix = "✓ WILL APPLY" if i == 0 else "✗ WILL SKIP"
+                color = "#90EE90" if i == 0 else "#FF6B6B"
+                
+                mod_label = QLabel(f"  {prefix}: <b>{mod_name}</b> ({choice})")
+                mod_label.setStyleSheet(f"color: {color}; font-size: 11pt; padding-left: 20px;")
+                conflict_layout.addWidget(mod_label)
+            
+            # Separator
+            line = QFrame()
+            line.setFrameShape(QFrame.HLine)
+            line.setFrameShadow(QFrame.Sunken)
+            conflict_layout.addWidget(line)
+        
+        conflict_layout.addStretch()
+        scroll.setWidget(conflict_container)
+        layout.addWidget(scroll)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setAlignment(Qt.AlignCenter)
+        
+        self.continue_btn = QPushButton("Continue Anyway")
+        self.continue_btn.setMinimumSize(160, 40)
+        self.continue_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF8C00;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #FFA500;
+            }
+        """)
+        self.continue_btn.setCursor(Qt.PointingHandCursor)
+        
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setMinimumSize(120, 40)
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        
+        btn_layout.addWidget(self.continue_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+        
+        self.clicked_button = None
+        self.continue_btn.clicked.connect(lambda: self._on_clicked(self.continue_btn))
+        self.cancel_btn.clicked.connect(lambda: self._on_clicked(self.cancel_btn))
+        
+        self.setStyleSheet("""
+            QDialog { background-color: #1A1A1A; }
+            QLabel { color: #E6E6E6; }
+            QPushButton {
+                background-color: #2A2A2A;
+                color: #E6E6E6;
+                border: 1px solid #444;
+                border-radius: 4px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255,255,255,0.15);
+            }
+            QScrollArea {
+                background-color: #121212;
+                border: 1px solid #333;
+            }
+        """)
+    
+    def _on_clicked(self, button):
+        self.clicked_button = button
+        self.accept()
+
+# ---------------------------------------
 # UnsavedChangesDialog — warns about unsaved changes through WINDOW
 # ---------------------------------------
 class UnsavedChangesDialog(QDialog):
@@ -7405,6 +7525,98 @@ class StorybookUI(QWidget):
                 return c
         return candidates[0]
 
+    # --- Detect whether a mod is being conflicted with another, lmao ---
+    def _detect_file_conflicts(self, enabled_mods: list) -> dict:
+        """
+        Detect file conflicts across enabled mods.
+        Returns: {filename: [(mod_name, choice_name), ...]} for files with 2+ mods
+        """
+        file_to_mods = {}  # {filename: [(mod_name, choice_name), ...]}
+
+        for m in enabled_mods:
+            mod_path = Path(m['path'])
+            mod_name = m.get('name', mod_path.name)
+
+            files_this_mod_touches = set()
+
+            # Load mod_data.json to check configs
+            data_file = mod_path / "mod_data.json"
+            cfg = {}
+            attachments = {}
+
+            if data_file.exists():
+                try:
+                    data = json.loads(data_file.read_text(encoding="utf-8"))
+                    cfg = data.get("CONFIGURE MOD MENU", {}) or {}
+                    section = data.get("SET CONFIGURE SCHEMA", {}) or {}
+                    attachments = section.get("attachments", {}) or {}
+                except Exception:
+                    pass
+                
+            # Check if mod has config
+            if cfg and attachments:
+                # Has config: check what's currently selected
+                for dropdown_key, selected_value in cfg.items():
+                    if not isinstance(selected_value, str):
+                        continue
+                    
+                    # Get files for this dropdown's selected choice
+                    entry = attachments.get(dropdown_key, {}).get(selected_value, {})
+                    if entry:
+                        for fm in entry.get("files", []):
+                            dst_name = fm.get("dst")
+                            if dst_name:
+                                files_this_mod_touches.add((dst_name, f"{dropdown_key}: {selected_value}"))
+            else:
+                # No config: scan all files in mod folder
+                choice_label = "All Files"
+
+                # Check file_mappings.json for explicit mappings
+                mapping_file = mod_path / "file_mappings.json"
+                if mapping_file.exists():
+                    try:
+                        mapping = json.loads(mapping_file.read_text(encoding="utf-8"))
+                        for src_rel, dst_name in mapping.items():
+                            if dst_name:
+                                files_this_mod_touches.add((dst_name, choice_label))
+                    except Exception:
+                        pass
+                    
+                # Walk mod folder for implicit files
+                game_key = GAME_KEYS[self.current_game]
+                gconf = self.settings["games"].get(game_key, {})
+                vanilla = Path(gconf.get("vanilla") or "")
+
+                if vanilla.exists():
+                    valid_game_dirs = {p.name for p in vanilla.iterdir() if p.is_dir()}
+
+                    for dirpath, _, filenames in os.walk(mod_path, followlinks=True):
+                        rel_dir = Path(dirpath).relative_to(mod_path)
+
+                        # Skip non-game directories
+                        if rel_dir.parts and rel_dir.parts[0] not in valid_game_dirs:
+                            continue
+                        
+                        for fname in filenames:
+                            if fname in ("packed_files.bin", "mod.ini", "config_schema.json",
+                                         "config.json", "config_schema_files.json",
+                                         "preview.png", "file_mappings.json", "mod_data.json"):
+                                continue
+                            
+                            # Use just the filename as the conflict key
+                            files_this_mod_touches.add((fname, choice_label))
+
+            # Add to tracking map
+            for filename, choice in files_this_mod_touches:
+                if filename not in file_to_mods:
+                    file_to_mods[filename] = []
+                file_to_mods[filename].append((mod_name, choice))
+
+        # Filter to only conflicts (2+ mods touching same file)
+        conflicts = {f: mods for f, mods in file_to_mods.items() if len(mods) >= 2}
+
+        return conflicts
+
     def apply_mods_surgical(self):
         """
         Apply enabled mods into the game's vanilla tree.
@@ -7507,11 +7719,16 @@ class StorybookUI(QWidget):
                     except Exception:
                         attachments = {}
 
-    # --- Determine if this mod should apply or restore based on dropdowns ---
+            # --- Determine if this mod should apply or restore based on dropdowns ---
             has_enabled_choice = any(
                 isinstance(v, str) and v.strip().lower() == "enabled"
                 for v in (cfg or {}).values()
             )
+
+            # NEW: If no config exists at all, treat mod as "enabled" (apply its files)
+            if not cfg and not schema and not attachments:
+                has_enabled_choice = True
+                self.log(f"[surgical] {mod_name} has no config, applying all files")
 
             # NEW: For PNG-only mods without config, treat as "enabled" (apply textures)
             if is_texture_pack and not cfg:
@@ -8094,13 +8311,27 @@ class StorybookUI(QWidget):
 
         # Currently checked mods in the UI
         now_enabled = set()
+        enabled_mods_list = []
         for i in range(self.tree.topLevelItemCount()):
             it = self.tree.topLevelItem(i)
             if it.checkState(0) == Qt.Checked:
                 m = it.data(0, Qt.UserRole)
                 if m:
                     now_enabled.add(str(Path(m["path"]).resolve()))
+                    enabled_mods_list.append(m)
         
+        # ⚠️ NEW: Check for file conflicts
+        conflicts = self._detect_file_conflicts(enabled_mods_list)
+        if conflicts:
+            dlg = ConflictWarningDialog(self, conflicts)
+            self._handify_buttons(dlg)
+            dlg.exec_()
+
+            if dlg.clicked_button != dlg.continue_btn:
+                # User cancelled
+                return
+            # User chose to continue - conflicts will be handled by first-mod-wins logic
+
         # NEW: Check texture pack modes before applying
         gconf = self.settings["games"].get(key, {})
         dolphin_texture_path_str = gconf.get("dolphin_texture_path", "")
@@ -8204,12 +8435,26 @@ class StorybookUI(QWidget):
         prev_enabled = set(s["games"].get(key, {}).get("enabled_mods", []))
 
         now_enabled = set()
+        enabled_mods_list =[]
         for i in range(self.tree.topLevelItemCount()):
             it = self.tree.topLevelItem(i)
             if it.checkState(0) == Qt.Checked:
                 m = it.data(0, Qt.UserRole)
                 if m:
                     now_enabled.add(str(Path(m["path"]).resolve()))
+                    enabled_mods_list.append(m)
+
+        # ⚠️ NEW: Check for file conflicts
+        conflicts = self._detect_file_conflicts(enabled_mods_list)
+        if conflicts:
+            dlg = ConflictWarningDialog(self, conflicts)
+            self._handify_buttons(dlg)
+            dlg.exec_()
+
+            if dlg.clicked_button != dlg.continue_btn:
+                # User cancelled
+                return
+            # User chose to continue - conflicts will be handled by first-mod-wins logic
 
         # NEW: Check texture pack modes before applying
         gconf = self.settings["games"].get(key, {})
@@ -8626,7 +8871,7 @@ class StorybookUI(QWidget):
         """
         slides = [
             (
-                "Step 1: In Dolphin Emulator, put a path directory to your Storybook ROM.",
+                "Step 1: In Dolphin Emulator, Add a path directory to your Storybook ROM.",
                 resource_path("UI/help/Step1.gif")
             ),
             (
@@ -8634,7 +8879,7 @@ class StorybookUI(QWidget):
                 resource_path("UI/help/Step2.gif")
             ),
             (
-                "Step 3: Now put a path directory to the extracted game files.",
+                "Step 3: Now Add a path directory to the extracted game files.",
                 resource_path("UI/help/Step3.gif")
             ),
             (

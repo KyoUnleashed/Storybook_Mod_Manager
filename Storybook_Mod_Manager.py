@@ -5354,6 +5354,8 @@ class SettingsDialog(QDialog):
             edit.setText(path)
 
     def do_save(self):
+        self._navigated_to_subwindow = False # Clear the flag
+        
         s = load_settings()
         s["games"]["SecretRings"]["vanilla"] = self.sr_game.text()
         s["games"]["SecretRings"]["mods"] = self.sr_mods.text()
@@ -5386,21 +5388,40 @@ class SettingsDialog(QDialog):
             parent.show_help_setup()
 
     def _on_dolphin_textures_clicked(self):
-        # Close settings dialog and open texture packs dialog
-        self.accept()  # Close settings dialog
-
-        # Open the Dolphin Texture Packs dialog
+        # Save settings before navigating
+        s = load_settings()
+        s["games"]["SecretRings"]["vanilla"] = self.sr_game.text()
+        s["games"]["SecretRings"]["mods"] = self.sr_mods.text()
+        s["games"]["SecretRings"]["dolphin_shortcut"] = self.sr_dolphin.text()
+        s["games"]["BlackKnight"]["vanilla"] = self.bk_game.text()
+        s["games"]["BlackKnight"]["mods"] = self.bk_mods.text()
+        s["games"]["BlackKnight"]["dolphin_shortcut"] = self.bk_dolphin.text()
+        mode = self.theme_combo.currentText()
+        s["theme_mode"] = mode if mode in ("Dark Mode", "Storybook Themes") else "Dark Mode"
+        try:
+            s["check_updates_on_startup"] = bool(self.check_updates_cb.isChecked())
+        except Exception:
+            s["check_updates_on_startup"] = False
+        try:
+            s["quit_dolphin_with_game"] = bool(self.quit_dolphin_cb.isChecked())
+        except Exception:
+            s["quit_dolphin_with_game"] = True
+        save_settings(s)
+        
+        # Mark that we navigated (for cancel tracking)
+        self._navigated_to_subwindow = True
+        
+        # Close and open texture packs dialog
+        self.accept()
         dlg = DolphinTexturePackDialog(self.parent)
         try:
             self.parent._handify_buttons(dlg)
         except Exception:
             pass
+        dlg.exec_()
         
-        result = dlg.exec_()
-
-        # If user clicked "Back", reopen settings dialog
+        # Reopen if they clicked Back
         if hasattr(dlg, '_back_clicked') and dlg._back_clicked:
-            # Reopen settings dialog
             settings_dlg = SettingsDialog(self.parent)
             try:
                 self.parent._handify_buttons(settings_dlg)

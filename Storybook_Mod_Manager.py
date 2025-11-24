@@ -3506,6 +3506,19 @@ class ConfigureModSchemaDialog(QDialog):
                 "schema": self.schema or {},
                 "attachments": self.attachments or {}
             }
+            
+            # Create CONFIGURE MOD MENU section with default values
+            config_defaults = {}
+            for key, spec in (self.schema or {}).items():
+                if key.startswith("__"):
+                    continue
+                if spec.get("type") == "dropdown":
+                    config_defaults[key] = spec.get("default", "Disabled")
+            
+            # Only update if CONFIGURE MOD MENU doesn't exist yet
+            if "CONFIGURE MOD MENU" not in data:
+                data["CONFIGURE MOD MENU"] = config_defaults
+            
             data_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception as e:
             QMessageBox.critical(self, "Save Failed", f"Could not save schema:\n{e}")

@@ -6169,29 +6169,27 @@ class DolphinTexturePackConfigDialog(QDialog):
 
     def on_save(self):
         try:
-            # Validate that user selected an option
-            if not self.radio_copy.isChecked() and not self.radio_move.isChecked():
-                QMessageBox.warning(
-                    self,
-                    "Selection Required",
-                    "Please select either 'Copy' or 'Move' mode before saving."
-                )
-                return
-
+            # Allow saving even if nothing is selected (remove the validation check)
             cp, ini, _ = ensure_mod_ini(self.mod_folder)
-
-            new_mode = "move" if self.radio_move.isChecked() else "copy"
-
+    
+            # Determine new mode (empty string if nothing selected)
+            if self.radio_move.isChecked():
+                new_mode = "move"
+            elif self.radio_copy.isChecked():
+                new_mode = "copy"
+            else:
+                new_mode = ""  # Empty string means not configured
+    
             # If switching from move to copy, copy textures back to mod folder
             if self.initial_mode == "move" and new_mode == "copy":
                 self._copy_textures_back_to_mod()
-
-            # Save the new mode
+    
+            # Save the new mode (even if empty)
             cp.set(INI_SECTION, "TexturePackMode", new_mode)
-
+    
             with ini.open("w", encoding="utf-8") as f:
                 cp.write(f)
-
+    
             QMessageBox.information(
                 self, 
                 "Saved", 

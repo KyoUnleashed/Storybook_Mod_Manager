@@ -345,12 +345,15 @@ class GameWindowMonitor(QThread):
 # Helper for detecting mod is png only
 def _mod_is_png_only(mod_folder: Path) -> bool:
         """
-        Return True if this mod folder contains ONLY PNG files (besides mod.ini, mod_data.json).
+        Return True if this mod folder contains ONLY texture files (PNG, JPG, JPEG, DDS).
         This indicates it's a texture pack mod that needs Dolphin Custom Texture Path.
         """
         try:
-            has_png = False
+            has_texture = False
             has_other = False
+
+            # Supported texture extensions
+            texture_extensions = {".png", ".jpg", ".jpeg", ".dds"}
 
             for dirpath, _, filenames in os.walk(mod_folder):
                 for fname in filenames:
@@ -361,12 +364,12 @@ def _mod_is_png_only(mod_folder: Path) -> bool:
                         continue
                     
                     ext = Path(fname).suffix.lower()
-                    if ext == ".png":
-                        has_png = True
-                    elif ext:  # Has extension but not PNG
+                    if ext in texture_extensions:
+                        has_texture = True
+                    elif ext:  # Has extension but not a texture
                         has_other = True
 
-            return has_png and not has_other
+            return has_texture and not has_other
         except Exception:
             return False
 
@@ -496,9 +499,28 @@ def write_mod_data_snapshot(mod_folder: Path,
       - SET CONFIGURE SCHEMA: { schema, attachments }
       - CONFIGURE MOD MENU:   saved runtime config values
       - APPLIED FILES:        list of relative paths touched in the vanilla tree
+      - Preserves IS_TEXTURE_PACK marker if it exists
     Any section omitted stays empty in the written file (no merge with stale data).
     """
+    # Load existing data to preserve IS_TEXTURE_PACK marker
+    data_file = mod_folder / "mod_data.json"
+    if data_file.exists():
+        try:
+            data = json.loads(data_file.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    else:
+        data = {}
+
+    # Preserve IS_TEXTURE_PACK if it exists
+    is_texture_pack = data.get("IS_TEXTURE_PACK", None)
+
+    # Now build the new data
     data = {}
+    
+    # Restore the texture pack marker if it was present
+    if is_texture_pack is not None:
+        data["IS_TEXTURE_PACK"] = is_texture_pack
 
     if schema is not None or attachments is not None:
         data["SET CONFIGURE SCHEMA"] = {
@@ -7209,8 +7231,7 @@ class StorybookUI(QWidget):
     # Updates the Conext menu to fallback to the mod_data.json to see if it was a texture pack mod or not (if user has moved)
     def _is_texture_pack_via_applied_files(self, mod_folder: Path) -> bool:
         """
-        Fallback detection: check if mod_data.json has APPLIED FILES with .png extensions.
-        This catches texture packs where PNGs have already been moved to Dolphin path.
+        Fallback detection: check mod_data.json for IS_TEXTURE_PACK marker or APPLIED FILES with texture extensions.
         """
         try:
             data_file = mod_folder / "mod_data.json"
@@ -7218,13 +7239,18 @@ class StorybookUI(QWidget):
                 return False
             
             data = json.loads(data_file.read_text(encoding="utf-8"))
-            applied = data.get("APPLIED FILES", [])
             
+            # Check for explicit marker first
+            if data.get("IS_TEXTURE_PACK", False):
+                return True
+            
+            # Fallback: check applied files for texture extensions
+            applied = data.get("APPLIED FILES", [])
             if not applied:
                 return False
             
-            # Check if any applied file is a PNG
-            return any(str(f).lower().endswith(".png") for f in applied)
+            texture_extensions = {".png", ".jpg", ".jpeg", ".dds"}
+            return any(str(f).lower().endswith(tuple(texture_extensions)) for f in applied)
         except Exception:
             return False
 
@@ -7710,9 +7736,19 @@ class StorybookUI(QWidget):
             mod_path = Path(m['path'])
             mod_name = m.get('name', mod_path.name)
             self.log(f"[surgical] applying mod {mod_name}")
-
-            # Check if this is a PNG-only (texture pack) mod
+        
+            # Check if this is a texture pack mod
             is_texture_pack = _mod_is_png_only(mod_path)
+            
+            # Mark it as a texture pack in mod_data.json for future reference
+            if is_texture_pack:
+                try:
+                    data_file = mod_path / "mod_data.json"
+                    data = json.loads(data_file.read_text(encoding="utf-8")) if data_file.exists() else {}
+                    data["IS_TEXTURE_PACK"] = True
+                    data_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
             
             # Get texture pack mode from mod.ini
             texture_pack_mode = "copy"  # default
@@ -7944,7 +7980,7 @@ class StorybookUI(QWidget):
                     # NEW: Handle texture pack files
                     if is_texture_pack:
                         # For texture packs, copy PNGs directly to dolphin texture path
-                        if src.suffix.lower() != ".png":
+                        if src.suffix.lower() not in {".png", ".jpg", ".jpeg", ".dds"}:
                             continue
                         
                         target_name = mapping.get(rel, fname)
@@ -8020,7 +8056,7 @@ class StorybookUI(QWidget):
                             continue
                         
                     # NEW: Route to texture path if PNG and texture pack mod
-                    if is_texture_pack and src_path.suffix.lower() == ".png":
+                    if is_texture_pack and src_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".dds"}:
                         dest_path = dolphin_texture_path / dst_name
                         dest_path.parent.mkdir(parents=True, exist_ok=True)
                         try:
@@ -8787,7 +8823,6 @@ class StorybookUI(QWidget):
         """
         Restore/remove Dolphin textures for a mod.
         For texture packs: moves files back (move mode) or deletes them (copy mode).
-        Does NOT use backup archive for texture packs.
         """
         data_file = mod_path / "mod_data.json"
         if not data_file.exists():
@@ -8825,10 +8860,12 @@ class StorybookUI(QWidget):
                 # Move it back to mod folder
                 try:
                     if dst.exists():
-                        mod_dest = mod_path / Path(rel).name
+                        # Keep the full relative path structure when moving back
+                        mod_dest = mod_path / rel
+                        mod_dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.move(str(dst), str(mod_dest))
                         moved_back.append(rel)
-                        self.log(f"[restore] Moved texture {Path(rel).name} back to mod folder")
+                        self.log(f"[restore] Moved texture {rel} back to mod folder")
                     else:
                         self.log(f"[restore] Texture {rel} not found in Dolphin path (already moved?)")
                 except Exception as e:
@@ -8839,7 +8876,7 @@ class StorybookUI(QWidget):
                     if dst.exists():
                         dst.unlink()
                         deleted.append(rel)
-                        self.log(f"[restore] Deleted texture {Path(rel).name} from Dolphin path")
+                        self.log(f"[restore] Deleted texture {rel} from Dolphin path")
                     else:
                         self.log(f"[restore] Texture {rel} already gone from Dolphin path")
                 except Exception as e:

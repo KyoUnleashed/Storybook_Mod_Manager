@@ -7,5 +7,5 @@
 ## A Mod Manager designed for the Sonic Storybook Games
 Here lies the source code, this entire script was made in Python - PyQt5, def easier
 than my other alternative (Tkinter) which I had used for the Sword Master GUI Tool.
-Definitely not the smartest way too do it, but it was too late to thoroughly optimize lmao
+Definitely not the smartest way too do it, but it was too late to thoroughly optimize (mark my laziness) lmao
 Made by Me, KyoUnleashed

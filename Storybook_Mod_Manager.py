@@ -7793,42 +7793,25 @@ class StorybookUI(QWidget):
                 for v in (cfg or {}).values()
             )
             
-            # NEW: If no config exists at all, treat mod as "enabled" (apply its files)
+            # NEW: If no config exists, treat as "always apply when checked in UI"
             if not cfg and not schema and not attachments:
                 has_enabled_choice = True
                 self.log(f"[surgical] {mod_name} has no config, applying all files")
             
-            # NEW: If config exists but is set to Disabled, DON'T skip root files
-            # Only skip if we're in restore mode (previously had files applied)
+            # NEW: If config exists but all choices disabled
             if not has_enabled_choice:
-                data_file = mod_path / "mod_data.json"
-                previously_applied = False
-                if data_file.exists():
-                    try:
-                        data = json.loads(data_file.read_text(encoding="utf-8"))
-                        previously_applied = bool(data.get("APPLIED FILES", []))
-                    except Exception:
-                        pass
-                    
-                if previously_applied:
-                    # This mod was previously applied, now disabled → restore
-                    if is_texture_pack:
-                        if texture_pack_mode == "move":
-                            self._restore_dolphin_textures(mod_path, game_key, dolphin_texture_path)
-                        restored = self._restore_dolphin_textures(mod_path, game_key, dolphin_texture_path)
-                        if restored:
-                            self.log(f"[apply] {mod_name}: texture pack disabled → restored {len(restored)} texture(s)")
-                    else:
-                        restored = restore_files_for_mod(mod_path, game_key, vanilla, log_fn=self.log)
-                        if restored:
-                            self.log(f"[apply] {mod_name}: all choices Disabled → restored {len(restored)} file(s)")
-                            archive = load_archive(game_key)
+                # All dropdowns disabled - handle texture packs specially
+                if is_texture_pack:
+                    # For texture packs, "disabled" means remove from Dolphin path
+                    restored = self._restore_dolphin_textures(mod_path, game_key, dolphin_texture_path)
+                    if restored:
+                        mode_label = "moved back" if texture_pack_mode == "move" else "deleted"
+                        self.log(f"[apply] {mod_name}: texture pack disabled → {mode_label} {len(restored)} texture(s)")
                     continue
                 else:
-                    # No previous application, and disabled → treat as "has no meaningful config"
-                    # (i.e., apply root files if they exist)
-                    has_enabled_choice = True
-                    self.log(f"[surgical] {mod_name}: config disabled but no previous application, applying root files")
+                    # For regular mods: skip config files but still apply base files
+                    self.log(f"[surgical] {mod_name}: all dropdowns disabled, applying base files only")
+                    # Don't continue - let it fall through to apply base mod files
 
             # NEW: For PNG-only mods without config, treat as "enabled" (apply textures)
             if is_texture_pack and not cfg:
@@ -7890,22 +7873,18 @@ class StorybookUI(QWidget):
                                         self.log(f"[restore] Failed to delete texture {dst_name}: {e}")
 
             if not has_enabled_choice:
-                # All choices disabled → restore
+                # All dropdowns disabled - handle texture packs specially
                 if is_texture_pack:
-                    # If move mode, copy textures back to mod folder first
-                    if texture_pack_mode == "move":
-                        self._restore_dolphin_textures(mod_path, game_key, dolphin_texture_path)
-                    # Restore from dolphin texture archive
+                    # For texture packs, "disabled" means remove from Dolphin path
                     restored = self._restore_dolphin_textures(mod_path, game_key, dolphin_texture_path)
                     if restored:
-                        self.log(f"[apply] {mod_name}: texture pack disabled → restored {len(restored)} texture(s)")
+                        mode_label = "moved back" if texture_pack_mode == "move" else "deleted"
+                        self.log(f"[apply] {mod_name}: texture pack disabled → {mode_label} {len(restored)} texture(s)")
+                    continue
                 else:
-                    # Normal game file restore
-                    restored = restore_files_for_mod(mod_path, game_key, vanilla, log_fn=self.log)
-                    if restored:
-                        self.log(f"[apply] {mod_name}: all choices Disabled → restored {len(restored)} file(s)")
-                        archive = load_archive(game_key)
-                continue
+                    # For regular mods: skip config files but still apply base files
+                    self.log(f"[surgical] {mod_name}: all dropdowns disabled, applying base files only")
+                    # Don't continue - let it fall through to apply base mod files
             
             # ---- Otherwise, proceed with application for Enabled state ----
             touched = []
@@ -8399,17 +8378,15 @@ class StorybookUI(QWidget):
     # --- Save / Play ---
     def on_save(self):
         key = GAME_KEYS[self.current_game]
-        # Guard: settings must be valid for this game before saving/applying
         if not settings_ready_for_game(self.settings, key):
             QMessageBox.warning(self, "Configure your settings!", "You must configure your settings before launching this game.")
             return
-        
+
+        # ✅ FIX: Load fresh settings to get the LATEST saved state
         s = load_settings()
-
-        # Previously committed enabled mods
         prev_enabled = set(s["games"].get(key, {}).get("enabled_mods", []))
+        self.log(f"[save] Previously enabled: {len(prev_enabled)} mods")
 
-        # Currently checked mods in the UI
         now_enabled = set()
         enabled_mods_list = []
         for i in range(self.tree.topLevelItemCount()):
@@ -8419,20 +8396,20 @@ class StorybookUI(QWidget):
                 if m:
                     now_enabled.add(str(Path(m["path"]).resolve()))
                     enabled_mods_list.append(m)
-        
-        # ⚠️ NEW: Check for file conflicts
+
+        self.log(f"[save] Currently checked: {len(now_enabled)} mods")
+
+        # Check for conflicts
         conflicts = self._detect_file_conflicts(enabled_mods_list)
         if conflicts:
             dlg = ConflictWarningDialog(self, conflicts)
             self._handify_buttons(dlg)
             dlg.exec_()
-
             if dlg.clicked_button != dlg.continue_btn:
-                # User cancelled
+                self.log(f"[save] User cancelled due to conflicts")
                 return
-            # User chose to continue - conflicts will be handled by first-mod-wins logic
 
-        # NEW: Check texture pack modes before applying
+        # Check texture pack modes
         gconf = self.settings["games"].get(key, {})
         dolphin_texture_path_str = gconf.get("dolphin_texture_path", "")
 
@@ -8445,7 +8422,6 @@ class StorybookUI(QWidget):
                     is_texture_pack = _mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)
 
                     if is_texture_pack:
-                        # Check if texture path is configured
                         if not dolphin_texture_path_str or not dolphin_texture_path_str.strip():
                             QMessageBox.warning(
                                 self,
@@ -8456,7 +8432,6 @@ class StorybookUI(QWidget):
                             )
                             return
 
-                        # Check if texture pack mode is configured
                         try:
                             cp, _, _ = ensure_mod_ini(mod_path)
                             texture_mode = cp.get(INI_SECTION, "TexturePackMode", fallback="")
@@ -8467,48 +8442,46 @@ class StorybookUI(QWidget):
                                 dlg.exec_()
 
                                 if dlg.clicked_button == dlg.settings_btn:
-                                    # Open the texture pack config dialog
                                     config_dlg = DolphinTexturePackConfigDialog(self, mod_path)
                                     self._handify_buttons(config_dlg)
                                     config_dlg.exec_()
-
-                                # Abort save process regardless
                                 return
                         except Exception as e:
                             self.log(f"[texture_check] Error checking texture mode: {e}")
 
-        # Restore files for mods that were enabled before but are now disabled
-        gconf = self.settings["games"].get(key, {})
-        vanilla = Path(gconf.get("vanilla") or "")
-        dolphin_texture_path = Path(gconf.get("dolphin_texture_path") or "")
-        
-        if not vanilla.exists():
-            QMessageBox.warning(self, "Missing Game Files", "Set Game Files (vanilla) in Settings first.")
-            return
-
+        # FIX: Only restore if there are actually mods to restore
         to_restore = prev_enabled - now_enabled
-        for pstr in to_restore:
-            mod_path = Path(pstr)
-            
-            # Check if it's a texture pack (including via applied files)
-            is_texture_pack = _mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)
-            
-            try:
-                if is_texture_pack:
-                    # Restore/delete textures using dolphin path
-                    if dolphin_texture_path and dolphin_texture_path.exists():
-                        restored = self._restore_dolphin_textures(mod_path, key, dolphin_texture_path)
-                        if restored:
-                            self.log(f"[restore] Processed {len(restored)} texture(s) for {mod_path.name}")
-                else:
-                    # Normal game file restore
-                    restored = restore_files_for_mod(mod_path, key, vanilla, log_fn=self.log)
-                    if restored:
-                        self.log(f"[restore] Restored {len(restored)} file(s) for {mod_path.name}")
-            except Exception as e:
-                self.log(f"[restore] failed for {pstr}: {e}")
+        self.log(f"[save] Mods to restore: {len(to_restore)}")
 
-        # Apply surgical changes for currently enabled mods
+        if to_restore:
+            gconf = self.settings["games"].get(key, {})
+            vanilla = Path(gconf.get("vanilla") or "")
+            dolphin_texture_path = Path(gconf.get("dolphin_texture_path") or "")
+
+            if not vanilla.exists():
+                QMessageBox.warning(self, "Missing Game Files", "Set Game Files (vanilla) in Settings first.")
+                return
+
+            for pstr in to_restore:
+                mod_path = Path(pstr)
+                self.log(f"[restore] Processing: {mod_path.name}")
+                is_texture_pack = _mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)
+
+                try:
+                    if is_texture_pack:
+                        if dolphin_texture_path and dolphin_texture_path.exists():
+                            restored = self._restore_dolphin_textures(mod_path, key, dolphin_texture_path)
+                            if restored:
+                                self.log(f"[restore] Processed {len(restored)} texture(s) for {mod_path.name}")
+                    else:
+                        restored = restore_files_for_mod(mod_path, key, vanilla, log_fn=self.log)
+                        if restored:
+                            self.log(f"[restore] Restored {len(restored)} file(s) for {mod_path.name}")
+                except Exception as e:
+                    self.log(f"[restore] failed for {pstr}: {e}")
+
+        # Apply mods
+        self.log(f"[save] --- APPLYING ENABLED MODS ---")
         if self.apply_mods_surgical():
             s["games"].setdefault(key, {})
             s["games"][key]["enabled_mods"] = list(now_enabled)
@@ -8523,19 +8496,23 @@ class StorybookUI(QWidget):
             self.unsaved_config = False
             self.unsaved_settings = False
 
+            self.log(f"[save] ✓ Save completed successfully")
+        else:
+            self.log(f"[save] ✗ Save failed during mod application")
+
     def on_save_and_play(self):
         key = GAME_KEYS[self.current_game]
-        # Guard: settings must be valid for this game before saving/applying/launch
         if not settings_ready_for_game(self.settings, key):
             QMessageBox.warning(self, "Configure your settings!", "You must configure your settings before launching this game.")
             return
 
+        # FIX: Load fresh settings FIRST
         s = load_settings()
-
         prev_enabled = set(s["games"].get(key, {}).get("enabled_mods", []))
+        self.log(f"[play] Previously enabled: {len(prev_enabled)} mods")
 
         now_enabled = set()
-        enabled_mods_list =[]
+        enabled_mods_list = []
         for i in range(self.tree.topLevelItemCount()):
             it = self.tree.topLevelItem(i)
             if it.checkState(0) == Qt.Checked:
@@ -8544,19 +8521,19 @@ class StorybookUI(QWidget):
                     now_enabled.add(str(Path(m["path"]).resolve()))
                     enabled_mods_list.append(m)
 
-        # ⚠️ NEW: Check for file conflicts
+        self.log(f"[play] Currently checked: {len(now_enabled)} mods")
+
+        # Check for conflicts
         conflicts = self._detect_file_conflicts(enabled_mods_list)
         if conflicts:
             dlg = ConflictWarningDialog(self, conflicts)
             self._handify_buttons(dlg)
             dlg.exec_()
-
             if dlg.clicked_button != dlg.continue_btn:
-                # User cancelled
+                self.log(f"[play] User cancelled due to conflicts")
                 return
-            # User chose to continue - conflicts will be handled by first-mod-wins logic
 
-        # NEW: Check texture pack modes before applying
+        # Check texture pack modes
         gconf = self.settings["games"].get(key, {})
         dolphin_texture_path_str = gconf.get("dolphin_texture_path", "")
 
@@ -8569,7 +8546,6 @@ class StorybookUI(QWidget):
                     is_texture_pack = _mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)
 
                     if is_texture_pack:
-                        # Check if texture path is configured
                         if not dolphin_texture_path_str or not dolphin_texture_path_str.strip():
                             QMessageBox.warning(
                                 self,
@@ -8580,7 +8556,6 @@ class StorybookUI(QWidget):
                             )
                             return
 
-                        # Check if texture pack mode is configured
                         try:
                             cp, _, _ = ensure_mod_ini(mod_path)
                             texture_mode = cp.get(INI_SECTION, "TexturePackMode", fallback="")
@@ -8591,47 +8566,45 @@ class StorybookUI(QWidget):
                                 dlg.exec_()
 
                                 if dlg.clicked_button == dlg.settings_btn:
-                                    # Open the texture pack config dialog
                                     config_dlg = DolphinTexturePackConfigDialog(self, mod_path)
                                     self._handify_buttons(config_dlg)
                                     config_dlg.exec_()
-
-                                # Abort save process regardless
                                 return
                         except Exception as e:
                             self.log(f"[texture_check] Error checking texture mode: {e}")
 
-        # Restore files for mods that were enabled before but are now disabled
-        gconf = self.settings["games"].get(key, {})
-        vanilla = Path(gconf.get("vanilla") or "")
-        dolphin_texture_path = Path(gconf.get("dolphin_texture_path") or "")
-        
-        if not vanilla.exists():
-            QMessageBox.warning(self, "Missing Game Files", "Set Game Files (vanilla) in Settings first.")
-            return
-
+        # ✅ FIX: Only restore if there are actually mods to restore
         to_restore = prev_enabled - now_enabled
-        for pstr in to_restore:
-            mod_path = Path(pstr)
-            
-            # Check if it's a texture pack (including via applied files)
-            is_texture_pack = _mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)
-            
-            try:
-                if is_texture_pack:
-                    # Restore/delete textures using dolphin path
-                    if dolphin_texture_path and dolphin_texture_path.exists():
-                        restored = self._restore_dolphin_textures(mod_path, key, dolphin_texture_path)
-                        if restored:
-                            self.log(f"[restore] Processed {len(restored)} texture(s) for {mod_path.name}")
-                else:
-                    # Normal game file restore
-                    restored = restore_files_for_mod(mod_path, key, vanilla, log_fn=self.log)
-                    if restored:
-                        self.log(f"[restore] Restored {len(restored)} file(s) for {mod_path.name}")
-            except Exception as e:
-                self.log(f"[restore] failed for {pstr}: {e}")
+        self.log(f"[play] Mods to restore: {len(to_restore)}")
 
+        if to_restore:
+            gconf = self.settings["games"].get(key, {})
+            vanilla = Path(gconf.get("vanilla") or "")
+            dolphin_texture_path = Path(gconf.get("dolphin_texture_path") or "")
+
+            if not vanilla.exists():
+                QMessageBox.warning(self, "Missing Game Files", "Set Game Files (vanilla) in Settings first.")
+                return
+
+            for pstr in to_restore:
+                mod_path = Path(pstr)
+                self.log(f"[restore] Processing: {mod_path.name}")
+                is_texture_pack = _mod_is_png_only(mod_path) or self._is_texture_pack_via_applied_files(mod_path)
+
+                try:
+                    if is_texture_pack:
+                        if dolphin_texture_path and dolphin_texture_path.exists():
+                            restored = self._restore_dolphin_textures(mod_path, key, dolphin_texture_path)
+                            if restored:
+                                self.log(f"[restore] Processed {len(restored)} texture(s) for {mod_path.name}")
+                    else:
+                        restored = restore_files_for_mod(mod_path, key, vanilla, log_fn=self.log)
+                        if restored:
+                            self.log(f"[restore] Restored {len(restored)} file(s) for {mod_path.name}")
+                except Exception as e:
+                    self.log(f"[restore] failed for {pstr}: {e}")
+
+        self.log(f"[play] --- APPLYING ENABLED MODS ---")
         if self.apply_mods_surgical():
             s["games"].setdefault(key, {})
             s["games"][key]["enabled_mods"] = list(now_enabled)
@@ -8646,6 +8619,10 @@ class StorybookUI(QWidget):
             self.unsaved_schema = False
             self.unsaved_config = False
             self.unsaved_settings = False
+
+            self.log(f"[play] ✓ Save and Play completed successfully")
+        else:
+            self.log(f"[play] ✗ Save failed during mod application")
 
     def _show_saved_label(self):
         self.saved_lbl.move(self.width() - 200, self.height() - 70)

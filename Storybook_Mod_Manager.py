@@ -7793,8 +7793,13 @@ class StorybookUI(QWidget):
                 for v in (cfg or {}).values()
             )
             
-            # NEW: If no config exists, treat as "always apply when checked in UI"
-            if not cfg and not schema and not attachments:
+            # NEW: For PNG-only texture packs without config, always apply
+            if is_texture_pack and not cfg:
+                has_enabled_choice = True
+                self.log(f"[surgical] {mod_name} is a texture pack without config, applying all PNGs")
+            
+            # NEW: If no config exists (non-texture-pack mods), treat as "always apply when checked in UI"
+            if not cfg and not schema and not attachments and not is_texture_pack:
                 has_enabled_choice = True
                 self.log(f"[surgical] {mod_name} has no config, applying all files")
             

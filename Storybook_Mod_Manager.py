@@ -546,8 +546,9 @@ def write_mod_data_snapshot(mod_folder: Path,
 APP_VERSION = "1"
 APP_AUTHOR = "KyoUnleashed"
 
-# Set this to the raw URL of the latest script to enable self-update detection (not shown in UI).
-MANAGER_UPDATE_URL = "https://gamebanana.com/tools/20945"  # e.g., "https://gamebanana.com/mods/whaatever"
+# Set this to the raw URL of the version.txt file for self-update detection
+MANAGER_UPDATE_URL = "https://github.com/KyoUnleashed/Storybook_Mod_Manager/blob/main/version.txt"
+MANAGER_DOWNLOAD_URL = "https://gamebanana.com/tools/20945"
 
 # Handle PyInstaller executable vs script mode
 if getattr(sys, 'frozen', False):
@@ -567,7 +568,7 @@ EMBEDDED_ALLOWED_EXTS = {
     "ini","mis","one","rso","sel","sfd","tpl","txd","txt"
 }
 
-# Known top-level game data folders (mirror of your vanilla tree conventions)
+# Known top-level game data folders (if you use with mod folder, it'll place the files relative to the folders.)
 GAME_FILE_FOLDERS = {
     "adx", "event", "HomeButton2", "movie", "se", "Now", "sound"
 }
@@ -1151,13 +1152,22 @@ def extract_mod_id(url: str) -> str:
 def normalize_gamebanana_url(url: str) -> str:
     """Convert to GameBanana API URL to get mod info directly."""
     print(f"\n[DEBUG] Processing URL: {url}")
-    
     mod_id = extract_mod_id(url)
     if mod_id:
-        api_url = f"https://gamebanana.com/apiv11/Mod/{mod_id}?_csvProperties=_sName,_aSubmitter,_sVersion"
-        print(f"[DEBUG] Using API URL: {api_url}")
-        return api_url
-    
+        # Determine type: Mod, Tool, or Sound
+        url_lower = url.lower()
+        if '/tools/' in url_lower or '/tool/' in url_lower:
+            api_url = f"https://gamebanana.com/apiv11/Tool/{mod_id}?_csvProperties=_sName,_aSubmitter,_sVersion"
+            print(f"[DEBUG] Using Tool API URL: {api_url}")
+            return api_url
+        elif '/sounds/' in url_lower or '/sound/' in url_lower:
+            api_url = f"https://gamebanana.com/apiv11/Sound/{mod_id}?_csvProperties=_sName,_aSubmitter,_sVersion"
+            print(f"[DEBUG] Using Sound API URL: {api_url}")
+            return api_url
+        else:
+            api_url = f"https://gamebanana.com/apiv11/Mod/{mod_id}?_csvProperties=_sName,_aSubmitter,_sVersion"
+            print(f"[DEBUG] Using Mod API URL: {api_url}")
+            return api_url
     print("[DEBUG] Could not extract mod ID, using original URL")
     return url
 
@@ -3936,6 +3946,7 @@ class ConfigureModDialog(QDialog):
         right_panel.setMinimumWidth(420)
         right_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+
         preview_row = QHBoxLayout()
         preview_row.setSpacing(10)
         preview_row.setContentsMargins(0, 0, 0, 0)
@@ -3951,7 +3962,11 @@ class ConfigureModDialog(QDialog):
                 border: 1px solid #333333;
                 border-radius: 6px;
             }
-            QToolButton:hover {
+            QToolButton:disabled {
+                color: #555555;
+                background: #181818;
+            }
+            QToolButton:hover:!disabled {
                 background: #2A2A2A;
             }
         """)
@@ -3976,7 +3991,11 @@ class ConfigureModDialog(QDialog):
                 border: 1px solid #333333;
                 border-radius: 6px;
             }
-            QToolButton:hover {
+            QToolButton:disabled {
+                color: #555555;
+                background: #181818;
+            }
+            QToolButton:hover:!disabled {
                 background: #2A2A2A;
             }
         """)
@@ -3987,6 +4006,23 @@ class ConfigureModDialog(QDialog):
         preview_row.addWidget(self.picture_label, 1)
         preview_row.addWidget(self.btn_next, 0, Qt.AlignVCenter)
         right_col.addLayout(preview_row)
+
+        # Picture counter label
+        self.counter_label = QLabel("")
+        self.counter_label.setAlignment(Qt.AlignCenter)
+        self.counter_label.setStyleSheet("color:#B0B0B0; font-size:13px; margin-top:2px;")
+        right_col.addWidget(self.counter_label)
+
+        # Progress bar for image loading
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setStyleSheet("QProgressBar { background: #222; border-radius: 4px; } QProgressBar::chunk { background: #4A90E2; border-radius: 4px; }")
+        self.progress_bar.hide()
+        right_col.addWidget(self.progress_bar)
 
         # Caption
         self.preview_caption = QLabel("")
@@ -4499,13 +4535,21 @@ class ConfigureModDialog(QDialog):
                 self.btn_next.setEnabled(False)
             except Exception:
                 pass
+            self.counter_label.setText("")
             return
         combo = self.widgets[key]
         choice = combo.currentText()
         previews = self.attachments.get(key, {}).get(choice or "", {}).get("previews", [])
-        multi = len(previews) > 1
-        self.btn_prev.setEnabled(multi)
-        self.btn_next.setEnabled(multi)
+        n = len(previews)
+        idx = self._current_preview_idx.get((key, choice), 0)
+        # Counter label
+        if n > 0:
+            self.counter_label.setText(f"Pic: {idx+1} / {n}")
+        else:
+            self.counter_label.setText("")
+        # Arrow logic
+        self.btn_prev.setEnabled(n > 1 and idx > 0)
+        self.btn_next.setEnabled(n > 1 and idx < n-1)
 
     def _show_preview_for_active(self):
         self._show_preview_for_key_choice(self._active_key, None, hover=False)
@@ -4532,11 +4576,20 @@ class ConfigureModDialog(QDialog):
         idx = max(0, min(idx, len(previews) - 1))
         ref = previews[idx].get("ref", "")
         desc = previews[idx].get("desc", "")
-        
+
+        # Show progress bar while loading
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        QApplication.processEvents()
+
+        # Simulate progress for demonstration (replace with real async if needed)
+        for v in range(1, 101, 33):
+            self.progress_bar.setValue(v)
+            QApplication.processEvents()
+
         # Check if we're already showing this exact same image to avoid redundant fade-in
         current_ref = getattr(self, '_current_showing_ref', None)
         if current_ref == ref and self._layer_current and self._layer_current.isVisible():
-            # Just update the caption, no need to re-fade the same image
             self.preview_caption.setText(desc or "")
         else:
             pix = self._get_scaled_from_cache_or_base(ref, Qt.SmoothTransformation)
@@ -4546,6 +4599,9 @@ class ConfigureModDialog(QDialog):
                 self._current_showing_ref = ref
             else:
                 self._update_preview_idle()
+
+        self.progress_bar.setValue(100)
+        self.progress_bar.hide()
         self._refresh_buttons_enabled(key)
 
     def _show_instant(self, pix: QPixmap):
@@ -6772,26 +6828,45 @@ class StorybookUI(QWidget):
                 except Exception as e:
                     print(f"Error checking {mod.get('name','Unknown')}: {e}")
 
-            # NEW: Manager self-update check using GameBanana
+            # NEW: Manager self-update check using GitHub version.txt
             if MANAGER_UPDATE_URL:
                 try:
                     self.log("[update] Checking Mod Manager for updates...")
-                    latest_ver, latest_title = get_latest_version_and_title(MANAGER_UPDATE_URL)
-
-                    if latest_ver:
-                        current_manager_ver = APP_VERSION
-                        if compare_versions(current_manager_ver, latest_ver) < 0:
-                            updates.insert(0, {  # Insert at top so it shows first
-                                "name": "Storybook Mod Manager",
-                                "current": current_manager_ver,
-                                "latest": latest_ver,
-                                "url": MANAGER_UPDATE_URL
-                            })
-                            self.log(f"[update] Manager update available: {current_manager_ver} -> {latest_ver}")
+                    # Auto-convert GitHub HTML file URLs to raw URLs
+                    def github_to_raw(url):
+                        # Only convert if it's a github.com URL and not already raw
+                        m = re.match(r'https://github.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)', url)
+                        if m:
+                            user, repo, branch, path = m.groups()
+                            return f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}"
+                        return url
+                    fetch_url = github_to_raw(MANAGER_UPDATE_URL)
+                    response = requests.get(fetch_url, timeout=10)
+                    if response.status_code == 200:
+                        content = response.text.strip()
+                        # Accept either 'Version: x.y.z' or just 'x.y.z' on its own line
+                        match = re.search(r'Version:\s*(\d+(?:\.\d+)*)', content, re.IGNORECASE)
+                        if not match:
+                            match = re.search(r'^(\d+(?:\.\d+)*)$', content, re.MULTILINE)
+                        if match:
+                            latest_ver = match.group(1)
+                            # Normalize to semantic version (e.g., "1.0" -> "1.0.0")
+                            latest_ver = normalize_version_token(latest_ver)
+                            current_manager_ver = normalize_version_token(APP_VERSION)
+                            if compare_versions(current_manager_ver, latest_ver) < 0:
+                                updates.insert(0, {
+                                    "name": "Storybook Mod Manager",
+                                    "current": current_manager_ver,
+                                    "latest": latest_ver,
+                                    "url": MANAGER_DOWNLOAD_URL
+                                })
+                                self.log(f"[update] Manager update available: {current_manager_ver} -> {latest_ver}")
+                            else:
+                                self.log(f"[update] Manager is up to date (v{current_manager_ver})")
                         else:
-                            self.log(f"[update] Manager is up to date (v{current_manager_ver})")
+                            self.log("[update] Could not parse version from version.txt")
                     else:
-                        self.log("[update] Could not detect manager version from GameBanana")
+                        self.log(f"[update] Failed to fetch version.txt (HTTP {response.status_code})")
                 except Exception as e:
                     self.log(f"[update] Manager update check failed: {e}")
 

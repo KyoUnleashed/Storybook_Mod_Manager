@@ -10,8 +10,12 @@ than my other alternative (Tkinter) which I had used for the Sword Master GUI To
 Definitely not the smartest way too do it, but it was too late to thoroughly optimize (mark my laziness) lmao
 Made by Me, KyoUnleashed
 
+## Build Instructions
+1. Download the Source Files via the Green Button called "Code" and than "Download ZIP"
+2. Now run the build.bat to compile the script to an exe. [The build.bat compiles with the UI Folder, and the Icon]
+
 ## Miscallenous Info
-Also, I recommend running this with Adminstrator, I'm not too sure if their are problems without running it with admin, but it's ultimately safe to run with it.
+I recommend running this with Adminstrator, I'm not too sure if their are problems without running it with admin, but it's ultimately safe to run with it.
 
 ## Known Problems
  * Logs doesn't save before toggling them

@@ -14,6 +14,10 @@ Made by Me, KyoUnleashed
 Also, I recommend running this with Adminstrator, I'm not too sure if their are problems without running it with admin, but it's ultimately safe to run with it.
 
 ## Known Problems
- * Update Function: The update system doesn't detect tools or sound mods, currently, it only detect just mods.
+ * Logs doesn't save before toggling them
  * Re-ordering pictures is finicky and laggy, might perform horribly on weaker systems.
  * Fade In/Out in the Configure Mod Window is sometimes Jank.
+
+## Privacy and Security
+* This mod manager is designed to be safe and as transparent as it can be (even with the messy spaghetti code)
+* In No shape or form is this a virus or a harmful program.

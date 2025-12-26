@@ -2990,7 +2990,7 @@ class ConfigureModSchemaDialog(QDialog):
     def on_entry_selected(self, current: QListWidgetItem, previous=None):
         # Clear any existing preview first to avoid sticky images
         self._update_preview_idle()
-    
+
         if not current:
             self.ed_label.setText("")
             self.ed_default.clear()
@@ -2998,13 +2998,35 @@ class ConfigureModSchemaDialog(QDialog):
             self.mapping_label.setText("Mod file: —")
             self.mapping_label.setToolTip("")
             return
-    
+
         key = current.data(Qt.UserRole)
         spec = self.schema.get(key, {})
         self.ed_label.setText(spec.get("label", key))
-    
+
         self._load_choice_ui(key)
         self._refresh_choice_summary_and_preview()
+
+        # NEW: Connect label edit to auto-update the list
+        try:
+            self.ed_label.textChanged.disconnect()  # Remove old connection if exists
+        except Exception:
+            pass
+        
+        if current:
+            self.ed_label.textChanged.connect(lambda text, k=key, it=current: self._update_list_label(k, it, text))
+
+    # Helper For Automatically Updating Label on the Left
+    def _update_list_label(self, key, item, new_text):
+        """Update the list item's display text when label is edited"""
+        try:
+            if not new_text.strip():
+                new_text = key  # Fallback to key if empty
+            item.setText(new_text)
+            # Also update schema immediately
+            if key in self.schema:
+                self.schema[key]["label"] = new_text
+        except Exception:
+            pass
 
     def on_choice_selected(self, current: QListWidgetItem, previous=None):
         self._refresh_choice_summary_and_preview()

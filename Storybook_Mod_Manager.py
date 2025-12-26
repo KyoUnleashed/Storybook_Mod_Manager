@@ -5106,65 +5106,88 @@ class UpdateCheckDialog(QDialog):
             empty.setAlignment(Qt.AlignCenter)
             list_layout.addWidget(empty)
         else:
+            # Group updates by game (extract game name from mod name like "Mod Name (Game Name)")
+            updates_by_game = {}
             for u in updates:
-                entry_frame = QFrame()
-                entry = QVBoxLayout(entry_frame)
-                entry.setSpacing(10)
+                mod_name = u.get('name', '(mod)')
+                # Extract game name if it's in parentheses at the end
+                game_name = "Unknown"
+                if '(' in mod_name and mod_name.endswith(')'):
+                    parts = mod_name.rsplit('(', 1)
+                    if len(parts) == 2:
+                        game_name = parts[1].rstrip(')')
+                        mod_name = parts[0].strip()  # Clean up mod name
+                        u['name'] = mod_name  # Store cleaned name
+                
+                if game_name not in updates_by_game:
+                    updates_by_game[game_name] = []
+                updates_by_game[game_name].append(u)
+            
+            # Display updates grouped by game
+            for game_name in sorted(updates_by_game.keys()):
+                # Add game header with banner/icon
+                self._add_game_header(list_layout, game_name)
+                
+                # Add mods for this game
+                for u in updates_by_game[game_name]:
+                    entry_frame = QFrame()
+                    entry = QVBoxLayout(entry_frame)
+                    entry.setSpacing(10)
 
-                name_label = QLabel(f"<b>{u.get('name','(mod)')}</b>")
-                name_label.setAlignment(Qt.AlignCenter)
-                name_label.setStyleSheet("font-size: 13pt;")
-                entry.addWidget(name_label)
+                    name_label = QLabel(f"<b>{u.get('name','(mod)')}</b>")
+                    name_label.setAlignment(Qt.AlignCenter)
+                    name_label.setStyleSheet("font-size: 13pt;")
+                    entry.addWidget(name_label)
 
-                ver_label = QLabel(f"{u.get('current','?')} → {u.get('latest','?')}")
-                ver_label.setAlignment(Qt.AlignCenter)
-                ver_label.setStyleSheet("font-size: 11pt; color: #C8C8C8;")
-                entry.addWidget(ver_label)
+                    ver_label = QLabel(f"{u.get('current','?')} → {u.get('latest','?')}")
+                    ver_label.setAlignment(Qt.AlignCenter)
+                    ver_label.setStyleSheet("font-size: 11pt; color: #C8C8C8;")
+                    entry.addWidget(ver_label)
 
-                thumb_label = QLabel()
-                thumb_label.setAlignment(Qt.AlignCenter)
-                thumb_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-                thumb_label.setMaximumHeight(900)
+                    thumb_label = QLabel()
+                    thumb_label.setAlignment(Qt.AlignCenter)
+                    thumb_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                    thumb_label.setMaximumHeight(900)
 
-                pix = self._load_thumbnail_from_page(u.get("url", ""))
-                if pix:
-                    self._entry_pixmaps.append(pix)
-                    self._thumb_labels.append(thumb_label)
-                    thumb_label.setPixmap(self._scaled_pix(pix, thumb_label))
-                else:
-                    self._entry_pixmaps.append(None)
-                    self._thumb_labels.append(thumb_label)
-                    thumb_label.setText("[No Thumbnail]")
+                    pix = self._load_thumbnail_from_page(u.get("url", ""))
+                    if pix:
+                        self._entry_pixmaps.append(pix)
+                        self._thumb_labels.append(thumb_label)
+                        thumb_label.setPixmap(self._scaled_pix(pix, thumb_label))
+                    else:
+                        self._entry_pixmaps.append(None)
+                        self._thumb_labels.append(thumb_label)
+                        thumb_label.setText("[No Thumbnail]")
 
-                entry.addWidget(thumb_label, 0, Qt.AlignCenter)
+                    entry.addWidget(thumb_label, 0, Qt.AlignCenter)
 
-                btn_row = QHBoxLayout()
-                btn_row.setSpacing(100)  # keep your spacing
-                btn_row.setAlignment(Qt.AlignCenter)
+                    btn_row = QHBoxLayout()
+                    btn_row.setSpacing(100)  # keep your spacing
+                    btn_row.setAlignment(Qt.AlignCenter)
 
-                close_btn = QPushButton("Close")
-                close_btn.setMinimumSize(150, 50)
-                close_btn.setCursor(Qt.PointingHandCursor)
-                close_btn.clicked.connect(self.reject)
+                    close_btn = QPushButton("Close")
+                    close_btn.setMinimumSize(150, 50)
+                    close_btn.setCursor(Qt.PointingHandCursor)
+                    close_btn.clicked.connect(self.reject)
 
-                page_btn = QPushButton("Go to Page")
-                page_btn.setMinimumSize(150, 50)
-                page_btn.setCursor(Qt.PointingHandCursor)
+                    page_btn = QPushButton("Go to Page")
+                    page_btn.setMinimumSize(150, 50)
+                    page_btn.setCursor(Qt.PointingHandCursor)
 
-                idx = len(self._mod_entries)
-                page_btn.clicked.connect(lambda _, link=u.get("url",""), i=idx: self._open_and_scroll(link, i))
+                    idx = len(self._mod_entries)
+                    page_btn.clicked.connect(lambda _, link=u.get("url",""), i=idx: self._open_and_scroll(link, i))
 
-                btn_row.addWidget(close_btn)
-                btn_row.addWidget(page_btn)
-                entry.addLayout(btn_row)
+                    btn_row.addWidget(close_btn)
+                    btn_row.addWidget(page_btn)
+                    entry.addLayout(btn_row)
 
-                self._mod_entries.append(entry_frame)
-                list_layout.addWidget(entry_frame)
+                    self._mod_entries.append(entry_frame)
+                    list_layout.addWidget(entry_frame)
 
-                line = QFrame()
-                line.setFrameShape(QFrame.HLine)
-                line.setFrameShadow(QFrame.Sunken)
-                list_layout.addWidget(line)
+                    line = QFrame()
+                    line.setFrameShape(QFrame.HLine)
+                    line.setFrameShadow(QFrame.Sunken)
+                    list_layout.addWidget(line)
 
         container.setLayout(list_layout)
         scroll.setWidget(container)
@@ -5184,6 +5207,48 @@ class UpdateCheckDialog(QDialog):
             QPushButton:hover { background-color: #2A2A2A; }
             QPushButton:pressed { background-color: #111; }
         """)
+
+    def _add_game_header(self, layout, game_name):
+        """Add a game header with banner or icon + title"""
+        header_widget = QWidget()
+        header_layout = QVBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 8, 0, 8)
+        header_layout.setSpacing(6)
+
+        # Try to find and display game banner using the proper game name
+        banner_path = find_settings_overview_banner(game_name)
+        if banner_path and Path(banner_path).exists():
+            banner_lbl = QLabel()
+            banner_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+            banner_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            banner_pix = QPixmap(str(banner_path)).scaledToHeight(79, Qt.SmoothTransformation)
+            banner_lbl.setPixmap(banner_pix)
+            header_layout.addWidget(banner_lbl)
+        else:
+            # Fallback: use icon + text
+            icon_hdr = QHBoxLayout()
+            # Use the game_name directly for icon lookup (e.g. "Secret Rings" not "secretrings")
+            icon_path = find_ui_icon(game_name, "Settings")
+            icon_lbl = QLabel()
+            if icon_path and Path(icon_path).exists():
+                icon_pix = QPixmap(str(icon_path)).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                icon_lbl.setPixmap(icon_pix)
+            icon_hdr.addWidget(icon_lbl)
+            
+            name_lbl = QLabel(game_name)
+            name_lbl.setStyleSheet("font-size: 16px; font-weight: 700; color: #E6E6E6;")
+            name_lbl.setAlignment(Qt.AlignCenter)
+            icon_hdr.addWidget(name_lbl, 1, Qt.AlignCenter)
+            header_layout.addLayout(icon_hdr)
+
+        layout.addWidget(header_widget)
+
+        # Separator line
+        sep_line = QFrame()
+        sep_line.setFrameShape(QFrame.HLine)
+        sep_line.setFrameShadow(QFrame.Sunken)
+        sep_line.setStyleSheet("color: #444;")
+        layout.addWidget(sep_line)
 
     # --- Browser open + smooth scroll ---
     def _open_and_scroll(self, url, idx):
@@ -5380,7 +5445,7 @@ class SettingsDialog(QDialog):
 
         # Check Updates on Startup checkbox (bottom-left)
         self.check_updates_cb = QCheckBox("Check Updates on Startup")
-        self.check_updates_cb.setChecked(bool(s.get("check_updates_on_startup", False)))
+        self.check_updates_cb.setChecked(bool(s.get("check_updates_on_startup", True)))
         cb_row = QHBoxLayout()
         cb_row.addWidget(self.check_updates_cb)
         cb_row.addStretch()
@@ -6823,32 +6888,42 @@ class StorybookUI(QWidget):
         def run():
             updates = []
 
-            # Collect mods from the tree
-            mods = []
-            for i in range(self.tree.topLevelItemCount()):
-                item = self.tree.topLevelItem(i)
-                mod = item.data(0, Qt.UserRole)
-                if mod != 0:
-                    mods.append(mod)
-
-            # Check mod updates
-            for mod in mods:
+            # Collect mods from BOTH games (Secret Rings + Black Knight)
+            all_mods = {}  # {game_name: [mods]}
+            
+            for game_pretty_name, game_key in GAME_KEYS.items():
                 try:
-                    current_ver = mod.get("version")
-                    mod_url = mod.get("update") or mod.get("url") or mod.get("update_url") or mod.get("homepage")
-                    if not mod_url:
+                    mods_dir = self.settings.get("games", {}).get(game_key, {}).get("mods", "")
+                    if not mods_dir or not Path(mods_dir).exists():
+                        self.log(f"[update] {game_pretty_name} mods folder not configured, skipping")
                         continue
-
-                    latest_ver, latest_title = get_latest_version_and_title(mod_url)
-                    if latest_ver and compare_versions(current_ver, latest_ver) < 0:
-                        updates.append({
-                            "name": mod.get("name", "Unknown"),
-                            "current": current_ver,
-                            "latest": latest_ver,
-                            "url": mod_url
-                        })
+                    
+                    # Scan mods for this game
+                    mods = scan_mods_folder(Path(mods_dir))
+                    all_mods[game_pretty_name] = mods
+                    self.log(f"[update] Found {len(mods)} mods in {game_pretty_name}")
                 except Exception as e:
-                    print(f"Error checking {mod.get('name','Unknown')}: {e}")
+                    self.log(f"[update] Error scanning {game_pretty_name}: {e}")
+            
+            # Check mod updates from both games
+            for game_name, mods in all_mods.items():
+                for mod in mods:
+                    try:
+                        current_ver = mod.get("version", "0.0.0")
+                        mod_url = mod.get("update") or mod.get("url") or mod.get("update_url") or mod.get("homepage")
+                        if not mod_url:
+                            continue
+
+                        latest_ver, latest_title = get_latest_version_and_title(mod_url)
+                        if latest_ver and compare_versions(current_ver, latest_ver) < 0:
+                            updates.append({
+                                "name": f"{mod.get('name', 'Unknown')} ({game_name})",
+                                "current": current_ver,
+                                "latest": latest_ver,
+                                "url": mod_url
+                            })
+                    except Exception as e:
+                        print(f"Error checking {mod.get('name','Unknown')} in {game_name}: {e}")
 
             # NEW: Manager self-update check using GitHub version.txt
             if MANAGER_UPDATE_URL:
@@ -7406,6 +7481,17 @@ class StorybookUI(QWidget):
             settings = load_settings()
             mods_dir = Path(settings.get("games", {}).get(key, {}).get("mods", "") or "")
             enabled_list = set(settings.get("games", {}).get(key, {}).get("enabled_mods", []))
+            
+            # ---- Check if mods directory field is empty ----
+            mods_dir_str = settings.get("games", {}).get(key, {}).get("mods", "").strip()
+            if not mods_dir_str:
+                # No mods directory set, display empty list
+                placeholder = QTreeWidgetItem(["(Set a Mod Folder to see mods)", "", "", ""])
+                placeholder.setFlags(Qt.ItemIsEnabled)
+                self.tree.addTopLevelItem(placeholder)
+                self.tree.blockSignals(False)
+                self.log(f"[load_game] No mods folder set")
+                return
     
             # ---- Gather mods ----
             try:

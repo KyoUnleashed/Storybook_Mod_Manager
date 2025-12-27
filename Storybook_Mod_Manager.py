@@ -2986,34 +2986,54 @@ class ConfigureModSchemaDialog(QDialog):
             self.mapping_label.setToolTip("")
             self._update_preview_idle()
 
-
     def on_entry_selected(self, current: QListWidgetItem, previous=None):
         # Clear any existing preview first to avoid sticky images
         self._update_preview_idle()
-
+    
         if not current:
             self.ed_label.setText("")
             self.ed_default.clear()
             self.ed_default.addItems(["Enabled", "Disabled"])
             self.mapping_label.setText("Mod file: —")
             self.mapping_label.setToolTip("")
+            # Disconnect if nothing selected
+            try:
+                self.ed_label.textChanged.disconnect()
+            except Exception:
+                pass
             return
-
+    
         key = current.data(Qt.UserRole)
         spec = self.schema.get(key, {})
+        
+        # Block signals while setting text to avoid triggering old connections
+        self.ed_label.blockSignals(True)
         self.ed_label.setText(spec.get("label", key))
-
+        self.ed_label.blockSignals(False)
+    
         self._load_choice_ui(key)
         self._refresh_choice_summary_and_preview()
-
-        # NEW: Connect label edit to auto-update the list
+    
+        # Disconnect ALL previous textChanged connections
         try:
-            self.ed_label.textChanged.disconnect()  # Remove old connection if exists
+            self.ed_label.textChanged.disconnect()
         except Exception:
             pass
         
-        if current:
-            self.ed_label.textChanged.connect(lambda text, k=key, it=current: self._update_list_label(k, it, text))
+        # Create a proper closure that captures current key and item
+        def update_this_label(text):
+            try:
+                if not text.strip():
+                    text = key  # Fallback to key if empty
+                current.setText(text)
+                # Also update schema immediately with the correct key
+                if key in self.schema:
+                    self.schema[key]["label"] = text
+            except Exception:
+                pass
+            
+        # Connect with the closure instead of lambda
+        self.ed_label.textChanged.connect(update_this_label)
 
     # Helper For Automatically Updating Label on the Left
     def _update_list_label(self, key, item, new_text):

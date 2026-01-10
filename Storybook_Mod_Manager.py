@@ -2464,7 +2464,19 @@ class ConfigureModSchemaDialog(QDialog):
     def __init__(self, parent, mod_folder: Path):
         super().__init__(parent)
         self.setWindowTitle("Set Configure Mod Menu")
-        self.resize(1000, 720)
+        
+        # Detect screen resolution for responsive sizing
+        screen = QApplication.primaryScreen().geometry()
+        self.is_low_res = screen.width() < 1366 or screen.height() < 768
+        
+        if self.is_low_res:
+            self.resize(900, 600)  # Smaller for low-res
+        else:
+            self.resize(1000, 720)  # Original size
+        
+        # Enable maximize button
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
+        
         self.mod_folder = mod_folder
         self.schema_file = mod_folder / "config_schema.json"
         self.attach_file = mod_folder / "config_schema_files.json"
@@ -2493,13 +2505,28 @@ class ConfigureModSchemaDialog(QDialog):
         self._pix_cache = {}
         self._base_pix_cache = {}
 
+        # Somewhat of a fix in UI scaling. claude did most of it -3-
+        if self.is_low_res:
+            self.preview_width = 500  
+            self.preview_height = 200  
+            self.button_height = 24  
+            self.big_button_height = 38
+            self.arrow_size = 38
+        else:
+            self.preview_width = 480
+            self.preview_height = 360
+            self.button_height = 38
+            self.big_button_height = 70
+            self.arrow_size = 44
+
         # --- Layout ---
         main = QHBoxLayout(self)
+        main.setSpacing(8)  # Tighter spacing between panels
 
         # LEFT: dropdown list + buttons + description
         left = QVBoxLayout()
         self.list_entries = QListWidget()
-        self.list_entries.setMinimumHeight(220)
+        self.list_entries.setMinimumHeight(180 if self.is_low_res else 220)
         self.list_entries.currentItemChanged.connect(self.on_entry_selected)
         left.addWidget(self.list_entries)
 
@@ -2507,7 +2534,7 @@ class ConfigureModSchemaDialog(QDialog):
         self.btn_add_dropdown = QPushButton("Add Dropdown")
         self.btn_remove_selected = QPushButton("Remove Selected")
         for b in (self.btn_add_dropdown, self.btn_remove_selected):
-            b.setMinimumHeight(70)
+            b.setMinimumHeight(self.big_button_height)
             hook_flash(b)
         btn_row.addWidget(self.btn_add_dropdown)
         btn_row.addWidget(self.btn_remove_selected)
@@ -2517,26 +2544,27 @@ class ConfigureModSchemaDialog(QDialog):
         self.desc_edit = QTextEdit()
         self.desc_edit.setPlaceholderText("Write the mod description here.")
         self.desc_edit.setPlainText(self.schema_description or "")
-        self.desc_edit.setFixedHeight(150)
+        self.desc_edit.setFixedHeight(120 if self.is_low_res else 150)
         left.addWidget(self.desc_edit)
 
-        main.addLayout(left, 3)
+        # Give left panel less space in low-res (2 vs 5 ratio instead of 3 vs 4)
+        main.addLayout(left, 2 if self.is_low_res else 3)
 
         # RIGHT: editor + preview + mapping + buttons
         right = QVBoxLayout()
 
         form = QFormLayout()
         self.ed_label = QLineEdit()
-        self.ed_label.setMinimumHeight(32)
+        self.ed_label.setMinimumHeight(28 if self.is_low_res else 32)
         form.addRow("Label:", self.ed_label)
 
         self.choices_list = QListWidget()
-        self.choices_list.setMinimumHeight(150)
+        self.choices_list.setMinimumHeight(90 if self.is_low_res else 150)  # Reduced from 120
         self.choices_list.currentItemChanged.connect(self.on_choice_selected)
         self.btn_add_choice = QPushButton("Add Choice")
         self.btn_remove_choice = QPushButton("Remove Choice")
         for b in (self.btn_add_choice, self.btn_remove_choice):
-            b.setMinimumHeight(38)
+            b.setMinimumHeight(self.button_height)
             hook_flash(b)
         ch_row = QHBoxLayout()
         ch_row.addWidget(self.btn_add_choice)
@@ -2546,7 +2574,7 @@ class ConfigureModSchemaDialog(QDialog):
 
         self.ed_default = QComboBox()
         self.ed_default.addItems(["Enabled", "Disabled"])
-        self.ed_default.setMinimumHeight(34)
+        self.ed_default.setMinimumHeight(28 if self.is_low_res else 34)
         form.addRow("Default:", self.ed_default)
         right.addLayout(form)
 
@@ -2555,7 +2583,7 @@ class ConfigureModSchemaDialog(QDialog):
         self.mapping_label.setStyleSheet("color:#C8C8C8;")
         mapping_row.addWidget(self.mapping_label, 1)
         self.btn_rename_files_here = QPushButton("Rename/Delete Mod Files")
-        self.btn_rename_files_here.setMinimumHeight(38)
+        self.btn_rename_files_here.setMinimumHeight(self.button_height)
         hook_flash(self.btn_rename_files_here)
         mapping_row.addWidget(self.btn_rename_files_here, 0, Qt.AlignRight)
         right.addLayout(mapping_row)
@@ -2565,48 +2593,51 @@ class ConfigureModSchemaDialog(QDialog):
         prev_wrap = QHBoxLayout()
         self.btn_prev = QToolButton()
         self.btn_prev.setText("◀")
-        self.btn_prev.setFixedSize(44, 44)
-        self.btn_prev.setStyleSheet("""
-            QToolButton {
-                font-size: 22px;
+        self.btn_prev.setFixedSize(self.arrow_size, self.arrow_size)
+        self.btn_prev.setStyleSheet(f"""
+            QToolButton {{
+                font-size: {16 if self.is_low_res else 22}px;
                 background: #1A1A1A;
                 color: #FFFFFF;
                 border: 1px solid #333333;
                 border-radius: 6px;
-            }
-            QToolButton:hover {
+            }}
+            QToolButton:hover {{
                 background: #2A2A2A;
-            }
+            }}
         """)
         self.btn_prev.clicked.connect(lambda: self._arrow_flash_and_cycle(-1))
         self.btn_prev.setEnabled(False)
 
         mid = QVBoxLayout()
         self.preview_image_label = QLabel()
-        self.preview_image_label.setFixedSize(480, 360)
+        self.preview_image_label.setFixedSize(self.preview_width, self.preview_height)
         self.preview_image_label.setStyleSheet("background: transparent;")
+        self.preview_image_label.setScaledContents(False)  # Don't stretch, keep aspect ratio
+        self.preview_image_label.setAlignment(Qt.AlignCenter)
         mid.addWidget(self.preview_image_label, 0, Qt.AlignCenter)
 
         self.preview_caption = QLabel()
         self.preview_caption.setAlignment(Qt.AlignCenter)
-        self.preview_caption.setFixedWidth(420)
-        self.preview_caption.setStyleSheet("color: #AAAAAA; font-size: 13px; margin-top: 8px;")
+        self.preview_caption.setMaximumWidth(self.preview_width - 20)
+        self.preview_caption.setWordWrap(True)
+        self.preview_caption.setStyleSheet("color: #AAAAAA; font-size: 12px; margin-top: 6px;")
         mid.addWidget(self.preview_caption, 0, Qt.AlignCenter)
 
         self.btn_next = QToolButton()
         self.btn_next.setText("▶")
-        self.btn_next.setFixedSize(44, 44)
-        self.btn_next.setStyleSheet("""
-            QToolButton {
-                font-size: 22px;
+        self.btn_next.setFixedSize(self.arrow_size, self.arrow_size)
+        self.btn_next.setStyleSheet(f"""
+            QToolButton {{
+                font-size: {16 if self.is_low_res else 22}px;
                 background: #1A1A1A;
                 color: #FFFFFF;
                 border: 1px solid #333333;
                 border-radius: 6px;
-            }
-            QToolButton:hover {
+            }}
+            QToolButton:hover {{
                 background: #2A2A2A;
-            }
+            }}
         """)
         self.btn_next.clicked.connect(lambda: self._arrow_flash_and_cycle(1))
         self.btn_next.setEnabled(False)
@@ -2623,7 +2654,10 @@ class ConfigureModSchemaDialog(QDialog):
         self.btn_remove_picture_here = QPushButton("Change Order/Remove Picture From Choice")
         for b in (self.btn_add_mod_here, self.btn_remove_mod_here,
                   self.btn_add_picture_here, self.btn_remove_picture_here):
-            b.setMinimumHeight(38)
+            b.setMinimumHeight(self.button_height)
+            # Make button text smaller in low-res
+            if self.is_low_res:
+                b.setStyleSheet("font-size: 10px; padding: 2px 4px;")  # Reduced from 11px, added padding
             hook_flash(b)
         btns_row.addWidget(self.btn_add_mod_here)
         btns_row.addWidget(self.btn_remove_mod_here)
@@ -2637,7 +2671,8 @@ class ConfigureModSchemaDialog(QDialog):
         bottom_btns.rejected.connect(self.on_cancel)
         right.addWidget(bottom_btns)
 
-        main.addLayout(right, 4)
+        # Give right panel MORE space in low-res (2 vs 5 ratio instead of 3 vs 4)
+        main.addLayout(right, 5 if self.is_low_res else 4)
 
         # Wire up
         self.btn_add_dropdown.clicked.connect(self.add_dropdown)

@@ -335,11 +335,19 @@ class GameWindowMonitor(QThread):
             self.game_closed.emit()
             return
 
-        # Wait until game window disappears
+        # Wait until game window disappears.
+        # Require 3 consecutive misses before firing game_closed — this absorbs
+        # the brief window-enumeration blackout that happens when the system
+        # wakes from sleep, which would otherwise trigger a false game_closed.
+        consecutive_misses = 0
         while self._running:
             if not self.ui._game_window_present_for_key(self.game_key):
-                self.game_closed.emit()
-                return
+                consecutive_misses += 1
+                if consecutive_misses >= 1:
+                    self.game_closed.emit()
+                    return
+            else:
+                consecutive_misses = 0  # window came back, reset
             time.sleep(1)
 
 # Helper for detecting mod is png only
@@ -543,7 +551,7 @@ def write_mod_data_snapshot(mod_folder: Path,
 # -----------------------
 # App metadata & paths
 # -----------------------
-APP_VERSION = "1"
+APP_VERSION = "1.1"
 APP_AUTHOR = "KyoUnleashed"
 
 # Set this to the raw URL of the version.txt file for self-update detection
@@ -697,9 +705,6 @@ INI_DEFAULTS = {
     "AuthorURL": "",
     "UpdateURL": "",
     "Date": "",
-    "ID": "",
-    "IncludeDirectories": "",
-    "Dependencies": "",
     "TexturePackMode": ""  # "copy" or "move"
 }
 
@@ -2528,6 +2533,34 @@ class ConfigureModSchemaDialog(QDialog):
         self.list_entries = QListWidget()
         self.list_entries.setMinimumHeight(180 if self.is_low_res else 220)
         self.list_entries.currentItemChanged.connect(self.on_entry_selected)
+        self.list_entries.setDragDropMode(QListWidget.InternalMove)
+        self.list_entries.setDefaultDropAction(Qt.MoveAction)
+        self.list_entries.setSelectionMode(QListWidget.SingleSelection)
+        self.list_entries.model().rowsMoved.connect(self._on_dropdowns_reordered)
+        self.list_entries.setStyleSheet("""
+            QListWidget {
+                outline: none;
+                border: 1px solid #333;
+                border-radius: 4px;
+                background: #1a1a1c;
+            }
+            QListWidget::item {
+                padding: 5px 8px;
+                border-radius: 3px;
+                color: #E6E6E6;
+            }
+            QListWidget::item:hover {
+                background: rgba(255,255,255,0.07);
+            }
+            QListWidget::item:selected,
+            QListWidget::item:selected:active,
+            QListWidget::item:selected:!active {
+                background: rgba(255,255,255,0.13);
+                color: #FFFFFF;
+                outline: none;
+                border: none;
+            }
+        """)
         left.addWidget(self.list_entries)
 
         btn_row = QHBoxLayout()
@@ -2559,8 +2592,39 @@ class ConfigureModSchemaDialog(QDialog):
         form.addRow("Label:", self.ed_label)
 
         self.choices_list = QListWidget()
-        self.choices_list.setMinimumHeight(90 if self.is_low_res else 150)  # Reduced from 120
+        self.choices_list.setMinimumHeight(90 if self.is_low_res else 150)
         self.choices_list.currentItemChanged.connect(self.on_choice_selected)
+
+        # Enable drag-to-reorder
+        self.choices_list.setDragDropMode(QListWidget.InternalMove)
+        self.choices_list.setDefaultDropAction(Qt.MoveAction)
+        self.choices_list.setSelectionMode(QListWidget.SingleSelection)
+        self.choices_list.model().rowsMoved.connect(self._on_choices_reordered)
+
+        self.choices_list.setStyleSheet("""
+            QListWidget {
+                outline: none;
+                border: 1px solid #333;
+                border-radius: 4px;
+                background: #1a1a1c;
+            }
+            QListWidget::item {
+                padding: 5px 8px;
+                border-radius: 3px;
+                color: #E6E6E6;
+            }
+            QListWidget::item:hover {
+                background: rgba(255,255,255,0.07);
+            }
+            QListWidget::item:selected,
+            QListWidget::item:selected:active,
+            QListWidget::item:selected:!active {
+                background: rgba(255,255,255,0.13);
+                color: #FFFFFF;
+                outline: none;
+                border: none;
+            }
+        """)
         self.btn_add_choice = QPushButton("Add Choice")
         self.btn_remove_choice = QPushButton("Remove Choice")
         for b in (self.btn_add_choice, self.btn_remove_choice):
@@ -2873,7 +2937,8 @@ class ConfigureModSchemaDialog(QDialog):
             print(f"[save_schema thin] error: {e}")
 
     # ---------------- UI plumbing ----------------
-    def _reload_list(self):
+    def _reload_list(self, auto_select=True):
+        self.list_entries.blockSignals(True)
         self.list_entries.clear()
         for key, spec in list(self.schema.items()):
             if key.startswith("__"):
@@ -2882,6 +2947,12 @@ class ConfigureModSchemaDialog(QDialog):
             item = QListWidgetItem(display)
             item.setData(Qt.UserRole, key)
             self.list_entries.addItem(item)
+        self.list_entries.blockSignals(False)
+        if auto_select and self.list_entries.count() > 0:
+            self.list_entries.setCurrentRow(0)
+            cur = self.list_entries.currentItem()
+            if cur:
+                self.on_entry_selected(cur)
 
     def _select_first_and_refresh(self):
         if self.list_entries.count() > 0:
@@ -2912,14 +2983,32 @@ class ConfigureModSchemaDialog(QDialog):
             i += 1
         return k
 
+    def _flush_current_label(self):
+        """Persist whatever is in ed_label right now into schema before any list reload."""
+        cur = self.list_entries.currentItem()
+        if not cur:
+            return
+        key = cur.data(Qt.UserRole)
+        if key and key in self.schema:
+            text = self.ed_label.text().strip() or key
+            self.schema[key]["label"] = text
+
     def add_dropdown(self):
         label, ok = QInputDialog.getText(self, "Add Dropdown", "Label for dropdown:")
         if not ok or not label.strip():
             return
+        # Flush any in-progress label edit on the currently selected dropdown
+        # BEFORE touching the list, so _reload_list doesn't overwrite it.
+        self._flush_current_label()
+        # Disconnect textChanged so the reload doesn't fire the old closure
+        try:
+            self.ed_label.textChanged.disconnect()
+        except Exception:
+            pass
         key = self._generate_key(label)
         self.schema[key] = {"label": label, "type": "dropdown",
                             "choices": ["Enabled", "Disabled"], "default": "Disabled"}
-        self._reload_list()
+        self._reload_list(auto_select=False)
         for i in range(self.list_entries.count()):
             it = self.list_entries.item(i)
             if it.data(Qt.UserRole) == key:
@@ -3565,6 +3654,37 @@ class ConfigureModSchemaDialog(QDialog):
         self._load_choice_ui(key)
         self._refresh_choice_summary_and_preview()
 
+    def _on_choices_reordered(self):
+        """Called after the user drags a choice to a new position. Syncs the new
+        order back into schema so it's persisted on save."""
+        key = self._current_dropdown_key()
+        if not key:
+            return
+        spec = self.schema.get(key, {})
+        if spec.get("type") != "dropdown":
+            return
+        new_order = [self.choices_list.item(i).text()
+                     for i in range(self.choices_list.count())]
+        spec["choices"] = new_order
+        self._refresh_choice_summary_and_preview()
+
+    def _on_dropdowns_reordered(self):
+        """Called after the user drags a dropdown to a new position. Rebuilds
+        schema in the new order so it's persisted on save."""
+        # Flush any in-progress label edit first
+        self._flush_current_label()
+        new_keys = [self.list_entries.item(i).data(Qt.UserRole)
+                    for i in range(self.list_entries.count())]
+        reordered = {}
+        for k in new_keys:
+            if k in self.schema:
+                reordered[k] = self.schema[k]
+        # Preserve any __ meta keys (e.g. __description__)
+        for k, v in self.schema.items():
+            if k.startswith("__"):
+                reordered[k] = v
+        self.schema = reordered
+
     def remove_choice(self):
         cur = self.list_entries.currentItem()
         if not cur:
@@ -3834,6 +3954,20 @@ class ConfigureModSchemaDialog(QDialog):
 # -----------------------
 # ConfigureModDialog (runtime)
 # -----------------------
+class TrackableComboBox(QComboBox):
+    """QComboBox that emits popup_shown/popup_hidden so we can track open/close."""
+    popup_shown  = pyqtSignal()
+    popup_hidden = pyqtSignal()
+
+    def showPopup(self):
+        super().showPopup()
+        self.popup_shown.emit()
+
+    def hidePopup(self):
+        super().hidePopup()
+        self.popup_hidden.emit()
+
+
 class ConfigureModDialog(QDialog):
     def __init__(self, parent, mod_folder: Path):
         super().__init__(parent)
@@ -3859,6 +3993,12 @@ class ConfigureModDialog(QDialog):
         self._pix_cache = {}       # scaled pixmaps cache (by ref+size+mode)
         self._base_pix_cache = {}  # base pixmaps cache (by ref only)
 
+        # Popup / hover tracking
+        self._key_to_combo     = {}   # key → TrackableComboBox
+        self._key_to_row_frame = {}   # key → row_frame
+        self._pre_open_choice  = {}   # key → choice text when popup opened
+        self._pending_fade_timer = None  # delayed fade-out on row Leave
+
         # Drag/resize throttle
         self._is_dragging_splitter = False
         self._drag_idle_timer = QTimer(self)
@@ -3882,13 +4022,6 @@ class ConfigureModDialog(QDialog):
         headline = QLabel("<span style='font-size:10pt; font-weight:600;'>Configure Mod Options</span>")
         headline.setAlignment(Qt.AlignCenter)
         outer.addWidget(headline)
-
-        # After creating labels and dropdowns
-        for lbl in self._label_to_combo.keys():
-            lbl.installEventFilter(self)
-            
-        for combo in self._label_to_combo.values():
-            combo.installEventFilter(self)
 
         # LEFT: scrollable form
         left_scroll = QScrollArea()
@@ -3926,8 +4059,6 @@ class ConfigureModDialog(QDialog):
             name_lbl.setStyleSheet("font-size:15px; font-weight:700; border: none;")
             name_lbl.setCursor(Qt.PointingHandCursor)
             name_lbl.setWordWrap(True)
-            name_lbl._hover_key = key
-            name_lbl.installEventFilter(self)
 
             name_lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
             row_layout.addWidget(name_lbl, 2)
@@ -3944,7 +4075,7 @@ class ConfigureModDialog(QDialog):
                 self.widgets[key] = w
 
             elif typ == "dropdown":
-                w = QComboBox()
+                w = TrackableComboBox()
                 w.setMinimumWidth(160)
                 w.setMaximumWidth(360)
                 w.setMinimumHeight(34)
@@ -3952,18 +4083,42 @@ class ConfigureModDialog(QDialog):
                 w.setCursor(Qt.PointingHandCursor)
                 w.setStyleSheet("""
                     QComboBox {
-                        background-color: #1A1A1A;
+                        background-color: #1a1a1c;
                         color: #E6E6E6;
-                        border: 1px solid #444444;
-                        selection-background-color: #3A3A3A;
+                        border: 1px solid #333;
+                        border-radius: 5px;
                         font-size: 15px;
-                        padding: 6px 8px;
+                        padding: 6px 10px;
                         min-height: 34px;
+                        selection-background-color: rgba(255,255,255,0.10);
+                    }
+                    QComboBox:hover {
+                        border: 1px solid #555;
+                        background-color: #202024;
+                    }
+                    QComboBox:on {
+                        border: 1px solid #666;
                     }
                     QComboBox QAbstractItemView {
-                        background-color: #1A1A1A;
+                        background-color: #1a1a1c;
                         color: #E6E6E6;
-                        font-size:14px;
+                        border: 1px solid #444;
+                        outline: none;
+                        font-size: 14px;
+                        padding: 2px;
+                        selection-background-color: rgba(255,255,255,0.10);
+                    }
+                    QComboBox QAbstractItemView::item {
+                        padding: 5px 8px;
+                        min-height: 26px;
+                        border-radius: 3px;
+                    }
+                    QComboBox QAbstractItemView::item:hover {
+                        background: rgba(255,255,255,0.07);
+                    }
+                    QComboBox QAbstractItemView::item:selected {
+                        background: rgba(255,255,255,0.12);
+                        color: #fff;
                     }
                 """)
 
@@ -3974,14 +4129,17 @@ class ConfigureModDialog(QDialog):
                 idx = idx if idx >= 0 else 0
                 w.setCurrentIndex(int(idx))
 
-                w._hover_key = key
-                w.installEventFilter(self)
+                # Signals
                 w.currentIndexChanged.connect(lambda _, k=key: self._on_combo_changed(k))
+                w.highlighted.connect(lambda index, k=key: self._on_combo_item_highlighted(k, index))
+                w.popup_shown.connect(lambda k=key: self._on_popup_shown(k))
+                w.popup_hidden.connect(lambda k=key: self._on_popup_hidden(k))
 
                 row_layout.addWidget(w, 3)
 
                 self._label_to_combo[name_lbl] = w
                 self._row_frames[name_lbl] = row_frame
+                self._key_to_combo[key] = w
                 name_lbl.mousePressEvent = lambda ev, k=key: self._on_label_clicked(k)
 
                 self.widgets[key] = w
@@ -4008,6 +4166,10 @@ class ConfigureModDialog(QDialog):
                     background: rgba(255,255,255,0.03);
                 }
             """)
+            if typ == "dropdown":
+                row_frame._hover_key = key
+                row_frame.installEventFilter(self)
+                self._key_to_row_frame[key] = row_frame
             left_col.addWidget(row_frame)
 
         left_col.addStretch(1)
@@ -4181,22 +4343,7 @@ class ConfigureModDialog(QDialog):
                 background-color: #1A1A1A;
                 color: #E6E6E6;
                 border: 1px solid #333;
-                selection-background-color: #3A3A3A;
-            }
-            QComboBox {
-                background-color: #1A1A1A;
-                color: #E6E6E6;
-                border: 1px solid #444444;
-                selection-background-color: #3A3A3A;
-                font-size: 14px;
-                padding: 2px 8px;
-                min-height: 32px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1A1A1A;
-                color: #E6E6E6;
-                selection-background-color: #3A3A3A;
-                font-size: 14px;
+                selection-background-color: rgba(255,255,255,0.10);
             }
         """)
 
@@ -4379,6 +4526,60 @@ class ConfigureModDialog(QDialog):
         self._apply_row_selection(key, selected=True)
         self._show_preview_for_active_instant()
 
+    def _on_combo_item_highlighted(self, key, index):
+        """Fires while user hovers over choices in the open popup — crossfade to that choice's image."""
+        combo = self._key_to_combo.get(key)
+        if combo is None:
+            return
+        choice = combo.itemText(index)
+        if not choice:
+            return
+        entry = self.attachments.get(key, {}).get(choice, {})
+        previews = entry.get("previews", [])
+        if not previews:
+            return
+        ref = previews[0].get("ref", "")
+        desc = previews[0].get("desc", "")
+        # Skip if already showing this exact image
+        if getattr(self, "_current_showing_ref", None) == ref:
+            self.preview_caption.setText(desc or "")
+            return
+        pix = self._get_scaled_from_cache_or_base(ref, Qt.SmoothTransformation)
+        if pix and not pix.isNull():
+            self._crossfade_to(pix, hover=True)
+            self.preview_caption.setText(desc or "")
+            self._current_showing_ref = ref
+
+    def _on_popup_shown(self, key):
+        """Record the choice at the moment the popup opens so we can detect dismiss-without-select.
+        Also pins _active_key so the row stays highlighted and the image is never faded while open."""
+        combo = self._key_to_combo.get(key)
+        if combo:
+            self._pre_open_choice[key] = combo.currentText()
+        # Pin the active key so row_frame Leave can't trigger a fade while popup is open
+        self._active_key = key
+        self._apply_row_selection(key, selected=True)
+        # Cancel any pending fade that was already queued
+        if self._pending_fade_timer and self._pending_fade_timer.isActive():
+            self._pending_fade_timer.stop()
+        # Show the current choice's image if not already visible
+        if combo:
+            self._show_preview_for_key_choice(key, combo.currentText(), hover=False)
+
+    def _on_popup_hidden(self, key):
+        """Called when popup closes. If user dismissed without selecting, deselect and fade out."""
+        combo = self._key_to_combo.get(key)
+        if combo is None:
+            return
+        current = combo.currentText()
+        pre     = self._pre_open_choice.get(key)
+        if current == pre:
+            # Dismissed without a selection — unpin and fade
+            self._active_key = None
+            self._deselect_all()
+            QTimer.singleShot(120, self._fade_out_preview)
+        # else: currentIndexChanged already fired → _on_combo_changed updated everything
+
     def _apply_row_selection(self, key, selected=False):
         for lbl, combo in self._label_to_combo.items():
             row = self._row_frames.get(lbl)
@@ -4430,119 +4631,48 @@ class ConfigureModDialog(QDialog):
                     return True
         return False
 
-    # eventFilter: hover shows preview
+    # eventFilter: row-level hover shows/hides preview cleanly
     def eventFilter(self, obj, ev):
-        # Existing hover and selection logic
-        if (isinstance(obj, QLabel) or isinstance(obj, QComboBox)) and hasattr(obj, "_hover_key"):
+        # --- Row frame Enter / Leave ---
+        if hasattr(obj, "_hover_key") and isinstance(obj, QFrame):
             key = obj._hover_key
-            row = self._row_frames.get(obj)
-
-            # Hover Enter Event
             if ev.type() == QEvent.Enter:
-                # Prevent preview changes when a row is already selected
+                # Cancel any pending fade-out
+                if self._pending_fade_timer and self._pending_fade_timer.isActive():
+                    self._pending_fade_timer.stop()
+                # Highlight row if not already selected
+                if not obj.property("selected"):
+                    obj.setProperty("hover", True)
+                    obj.style().unpolish(obj)
+                    obj.style().polish(obj)
+                    obj.update()
+                # Show preview for currently selected choice (no re-fade if same image)
                 if self._active_key is None:
-                    combo = self._label_to_combo.get(obj) if isinstance(obj, QLabel) else obj
+                    combo = self._key_to_combo.get(key)
                     if combo:
-                        choice = combo.currentText()
-                        if choice:
-                            # Show preview for the current dropdown's choice
-                            self._show_preview_for_key_choice(key, choice, hover=True)
-
-                            # Update row hover styling
-                            if row:
-                                row.setProperty("hover", True)
-                                row.style().unpolish(row)
-                                row.style().polish(row)
-                                row.update()
+                        self._show_preview_for_key_choice(key, combo.currentText(), hover=True)
                 return False
 
-            # Hover Leave Event
             elif ev.type() == QEvent.Leave:
-                # Prevent fade out when a row is selected
+                obj.setProperty("hover", False)
+                obj.style().unpolish(obj)
+                obj.style().polish(obj)
+                obj.update()
+                # Delayed fade — cancelled if another row is entered within 80ms
                 if self._active_key is None:
-                    self._fade_out_preview()
-                    if row:
-                        row.setProperty("hover", False)
-                        row.style().unpolish(row)
-                        row.style().polish(row)
-                        row.update()
+                    if self._pending_fade_timer is None:
+                        self._pending_fade_timer = QTimer(self)
+                        self._pending_fade_timer.setSingleShot(True)
+                        self._pending_fade_timer.setInterval(80)
+                        self._pending_fade_timer.timeout.connect(self._on_pending_fade_timeout)
+                    self._pending_fade_timer.start()
                 return False
-
-        # [NEW] Dropdown Choice Hover Preview Logic
-        if isinstance(obj, QComboBox) and ev.type() == QEvent.HoverMove:
-            # Ensure a row is selected and we're hovering over choices
-            if self._active_key is not None:
-                choice = obj.currentText()
-
-                # Check if the choice has a different preview
-                entry = self.attachments.get(self._active_key, {}).get(choice, {})
-                previews = entry.get("previews", [])
-
-                # Update preview for non-default choices with unique images
-                if choice not in ["Enabled", "Disabled"] and previews:
-                    ref = previews[0].get("ref", "")
-                    desc = previews[0].get("desc", "")
-
-                    # Generate and display preview
-                    pix = self._get_scaled_from_cache_or_base(ref, Qt.SmoothTransformation)
-                    if pix and not pix.isNull():
-                        # Modify this to prevent aggressive fading when row is selected
-                        self._crossfade_to(pix, hover=False)  # Changed from hover=True
-                        self.preview_caption.setText(desc)
-
-            return False
-
-        # Dropdown Selection Event
-        if isinstance(obj, QComboBox) and ev.type() == QEvent.MouseButtonPress:
-            # Set active key and select entire row
-            self._active_key = key
-            self._apply_row_selection(key, selected=True)
-
-            # Show preview for the selected choice
-            choice = obj.currentText()
-            entry = self.attachments.get(key, {}).get(choice, {})
-            previews = entry.get("previews", [])
-
-            if previews:
-                ref = previews[0].get("ref", "")
-                desc = previews[0].get("desc", "")
-                pix = self._get_scaled_from_cache_or_base(ref, Qt.SmoothTransformation)
-                if pix and not pix.isNull():
-                    self._crossfade_to(pix, hover=False)
-                    self.preview_caption.setText(desc)
-
-            return False
 
         return super().eventFilter(obj, ev)
 
-    def mouseMoveEvent(self, ev):
-        # Check if mouse is over any dropdown row
-        over_any_row = False
-        for lbl in self._label_to_combo.keys():
-            row = self._row_frames.get(lbl)
-            if row:
-                row_pos = row.mapFrom(self, ev.pos())
-                if QRect(QPoint(0, 0), row.size()).contains(row_pos):
-                    over_any_row = True
-                    break
-        
-        # Store the hover state and start/reset fade timer
-        if hasattr(self, '_hover_fade_timer'):
-            self._hover_fade_timer.stop()
-        else:
-            self._hover_fade_timer = QTimer(self)
-            self._hover_fade_timer.setSingleShot(True)
-            self._hover_fade_timer.timeout.connect(self._check_and_fade_preview)
-        
-        if over_any_row:
-            # Mouse is over a row, cancel any pending fade
-            pass
-        else:
-            # Mouse not over any row, start fade timer
-            if self._active_key is None:
-                self._hover_fade_timer.start(50)  # 50ms delay for faster response
-        
-        super().mouseMoveEvent(ev)
+    def _on_pending_fade_timeout(self):
+        if self._active_key is None:
+            self._fade_out_preview()
 
     def leaveEvent(self, ev):
         # Fade out preview when mouse leaves the entire dialog
@@ -4550,38 +4680,6 @@ class ConfigureModDialog(QDialog):
             if self._layer_current and self._layer_current.isVisible():
                 self._fade_out_preview()
         super().leaveEvent(ev)
-
-    def _check_and_fade_preview(self):
-        # Double-check that mouse is still not over any dropdown before fading
-        if self._active_key is None:
-            try:
-                cursor_pos = self.mapFromGlobal(self.cursor().pos())
-                over_any_row = False
-                
-                # Check if cursor is within the dialog bounds first
-                dialog_rect = QRect(QPoint(0, 0), self.size())
-                if not dialog_rect.contains(cursor_pos):
-                    # Mouse is outside dialog, definitely fade out
-                    if self._layer_current and self._layer_current.isVisible():
-                        self._fade_out_preview()
-                    return
-                
-                # Check each dropdown row
-                for lbl in self._label_to_combo.keys():
-                    row = self._row_frames.get(lbl)
-                    if row and row.isVisible():
-                        row_pos = row.mapFrom(self, cursor_pos)
-                        row_rect = QRect(QPoint(0, 0), row.size())
-                        if row_rect.contains(row_pos):
-                            over_any_row = True
-                            break
-                
-                if not over_any_row and self._layer_current and self._layer_current.isVisible():
-                    self._fade_out_preview()
-            except Exception:
-                # If there's any error, just fade out to be safe
-                if self._layer_current and self._layer_current.isVisible():
-                    self._fade_out_preview()
 
     # preview helpers (cache + crossfade)
     def _get_scaled_from_cache_or_base_public(self, ref: str, transform_mode: Qt.TransformationMode) -> QPixmap:
@@ -4654,16 +4752,6 @@ class ConfigureModDialog(QDialog):
         ref = previews[idx].get("ref", "")
         desc = previews[idx].get("desc", "")
 
-        # Show progress bar while loading
-        self.progress_bar.setValue(0)
-        self.progress_bar.show()
-        QApplication.processEvents()
-
-        # Simulate progress for demonstration (replace with real async if needed)
-        for v in range(1, 101, 33):
-            self.progress_bar.setValue(v)
-            QApplication.processEvents()
-
         # Check if we're already showing this exact same image to avoid redundant fade-in
         current_ref = getattr(self, '_current_showing_ref', None)
         if current_ref == ref and self._layer_current and self._layer_current.isVisible():
@@ -4677,8 +4765,6 @@ class ConfigureModDialog(QDialog):
             else:
                 self._update_preview_idle()
 
-        self.progress_bar.setValue(100)
-        self.progress_bar.hide()
         self._refresh_buttons_enabled(key)
 
     def _show_instant(self, pix: QPixmap):
@@ -5334,7 +5420,10 @@ class UpdateCheckDialog(QDialog):
             img_url = meta.get("content") if meta else None
             if not img_url:
                 return None
-            data = urlopen(img_url).read()
+            img_resp = requests.get(img_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+            if img_resp.status_code != 200:
+                return None
+            data = img_resp.content
             pix = QPixmap()
             if pix.loadFromData(data):
                 return pix
@@ -5413,6 +5502,157 @@ class UpdateProgressDialog(QDialog):
                 width: 20px;
             }
         """)
+
+# -----------------------
+# Manager self-update boot check
+# -----------------------
+class ManagerUpdateWorker(QThread):
+    """
+    Background thread that silently checks GitHub for a newer manager version.
+    Emits update_available(latest_ver_str) if the remote version beats APP_VERSION.
+    """
+    update_available = pyqtSignal(str)   # payload: latest version string
+
+    def run(self):
+        try:
+            url = MANAGER_UPDATE_URL
+            # Convert github.com/blob/ URL to raw so we can read the file
+            m = re.match(r'https://github.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)', url)
+            if m:
+                user, repo, branch, path = m.groups()
+                url = f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}"
+
+            resp = requests.get(url, timeout=10)
+            if resp.status_code != 200:
+                return
+
+            content = resp.text.strip()
+            match = re.search(r'Version:\s*(\d+(?:\.\d+)*)', content, re.IGNORECASE)
+            if not match:
+                match = re.search(r'^(\d+(?:\.\d+)*)$', content, re.MULTILINE)
+            if not match:
+                return
+
+            latest = normalize_version_token(match.group(1))
+            current = normalize_version_token(APP_VERSION)
+            if compare_versions(current, latest) < 0:
+                self.update_available.emit(latest)
+        except Exception:
+            pass
+
+
+class ManagerUpdatePopup(QDialog):
+    """
+    Small non-blocking popup shown on boot when a new manager version is available.
+    Has a 'Download' button that opens MANAGER_DOWNLOAD_URL and a 'Dismiss' button.
+    """
+    def __init__(self, latest_ver: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Mod Manager Update Available")
+        self.setModal(True)
+        self.setFixedWidth(420)
+
+        # Play the standard Windows beep
+        try:
+            QApplication.beep()
+        except Exception:
+            pass
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(14)
+        layout.setContentsMargins(24, 20, 24, 20)
+
+        title_lbl = QLabel("<b>A new version of Storybook Mod Manager is available!</b>")
+        title_lbl.setAlignment(Qt.AlignCenter)
+        title_lbl.setWordWrap(True)
+        title_lbl.setStyleSheet("font-size: 12pt; color: #E6E6E6;")
+        layout.addWidget(title_lbl)
+
+        current_ver = normalize_version_token(APP_VERSION)
+        ver_lbl = QLabel(f"Current: <b>v{current_ver}</b>   →   Latest: <b>v{latest_ver}</b>")
+        ver_lbl.setAlignment(Qt.AlignCenter)
+        ver_lbl.setStyleSheet("font-size: 10pt; color: #AAAAAA;")
+        layout.addWidget(ver_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+
+        download_btn = QPushButton("Download Update")
+        download_btn.setMinimumHeight(38)
+        download_btn.setCursor(Qt.PointingHandCursor)
+        download_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2a6496;
+                color: #ffffff;
+                border: none;
+                border-radius: 5px;
+                font-size: 10pt;
+                padding: 6px 16px;
+            }
+            QPushButton:hover { background-color: #3278ae; }
+            QPushButton:pressed { background-color: #1e4f78; }
+        """)
+        download_btn.clicked.connect(self._on_download)
+
+        dismiss_btn = QPushButton("Dismiss")
+        dismiss_btn.setMinimumHeight(38)
+        dismiss_btn.setCursor(Qt.PointingHandCursor)
+        dismiss_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2a2a2a;
+                color: #cccccc;
+                border: 1px solid #3a3a3a;
+                border-radius: 5px;
+                font-size: 10pt;
+                padding: 6px 16px;
+            }
+            QPushButton:hover { background-color: #353535; }
+            QPushButton:pressed { background-color: #1a1a1a; }
+        """)
+        dismiss_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(download_btn)
+        btn_row.addWidget(dismiss_btn)
+        layout.addLayout(btn_row)
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1a1a1c;
+                border: 1px solid #3a3a3a;
+            }
+            QLabel { color: #E6E6E6; background: transparent; }
+        """)
+
+    def _on_download(self):
+        try:
+            webbrowser.open(MANAGER_DOWNLOAD_URL)
+        except Exception:
+            try:
+                os.startfile(MANAGER_DOWNLOAD_URL)
+            except Exception:
+                pass
+        self.accept()
+
+
+def check_manager_update_on_boot(ui):
+    """
+    Spawns a background worker to check for a manager update.
+    If one is found, shows ManagerUpdatePopup (non-blocking) over the main window.
+    """
+    if not MANAGER_UPDATE_URL:
+        return
+    worker = ManagerUpdateWorker()
+
+    def _show_popup(latest_ver):
+        popup = ManagerUpdatePopup(latest_ver, parent=ui)
+        handify_buttons_in(popup)
+        popup.show()
+
+    worker.update_available.connect(_show_popup)
+    # Keep a reference so the thread isn't garbage-collected
+    ui._manager_update_worker = worker
+    worker.start()
+
 
 # -----------------------
 # Settings dialog (Dark Mode + Storybook Themes only)
@@ -5874,7 +6114,7 @@ class ModEditDialog(QDialog):
     def __init__(self, parent, mod_folder: Path):
         super().__init__(parent)
         self.setWindowTitle("Edit Mod")
-        self.resize(540, 520)
+        self.resize(540, 390)
         self.mod_folder = mod_folder
 
         cp, ini, _ = ensure_mod_ini(mod_folder)
@@ -5890,13 +6130,9 @@ class ModEditDialog(QDialog):
         self.ed_authorurl = QLineEdit(g("AuthorURL", ""))
         self.ed_update = QLineEdit(g("UpdateURL", ""))
         self.ed_date = QLineEdit(g("Date", ""))
-        self.ed_id = QLineEdit(g("ID", ""))
-        self.ed_include = QLineEdit(g("IncludeDirectories", ""))
-        self.ed_deps = QLineEdit(g("Dependencies", ""))
 
-        for w in (self.ed_name, self.ed_ver, self.ed_author, self.ed_authorurl,
-                  self.ed_update, self.ed_date,
-                  self.ed_id, self.ed_include, self.ed_deps):
+        for w in (self.ed_name, self.ed_ver, self.ed_author,
+                  self.ed_authorurl, self.ed_update, self.ed_date):
             w.setMinimumHeight(34)
             w.setStyleSheet("font-size: 14px;")
 
@@ -5906,9 +6142,6 @@ class ModEditDialog(QDialog):
         form.addRow("Author URL:", self.ed_authorurl)
         form.addRow("Update URL:", self.ed_update)
         form.addRow("Date (YYYY-MM-DD):", self.ed_date)
-        form.addRow("ID:", self.ed_id)
-        form.addRow("IncludeDirectories:", self.ed_include)
-        form.addRow("Dependencies:", self.ed_deps)
 
         outer.addWidget(form_wrap)
 
@@ -5952,9 +6185,6 @@ class ModEditDialog(QDialog):
             "AuthorURL": self.ed_authorurl.text().strip(),
             "UpdateURL": self.ed_update.text().strip(),
             "Date": self.ed_date.text().strip(),
-            "ID": self.ed_id.text().strip(),
-            "IncludeDirectories": self.ed_include.text().strip(),
-            "Dependencies": self.ed_deps.text().strip()
         }
 
     def accept(self):
@@ -6795,6 +7025,9 @@ class StorybookUI(QWidget):
         log_layout.addWidget(self.log_area)
         main.addWidget(self.log_container, 2)
 
+        # Buffer stores every log line even while the panel is hidden
+        self._log_buffer = []
+
         # start with logs disabled
         self.logs_enabled = False
         self.log_container.setVisible(False)
@@ -6995,11 +7228,12 @@ class StorybookUI(QWidget):
                     fetch_url = github_to_raw(MANAGER_UPDATE_URL)
                     response = requests.get(fetch_url, timeout=10)
                     if response.status_code == 200:
-                        content = response.text.strip()
-                        # Accept either 'Version: x.y.z' or just 'x.y.z' on its own line
-                        match = re.search(r'Version:\s*(\d+(?:\.\d+)*)', content, re.IGNORECASE)
+                        # Normalize line endings first so \r\n files don't break the regex anchors
+                        content = response.text.replace('\r\n', '\n').replace('\r', '\n').strip()
+                        # Accept 'Version: x.y.z', 'Version x.y.z', or just 'x.y.z' on its own line
+                        match = re.search(r'Version[:\s]+(\d+(?:\.\d+)*)', content, re.IGNORECASE)
                         if not match:
-                            match = re.search(r'^(\d+(?:\.\d+)*)$', content, re.MULTILINE)
+                            match = re.search(r'^\s*(\d+(?:\.\d+)*)\s*$', content, re.MULTILINE)
                         if match:
                             latest_ver = match.group(1)
                             # Normalize to semantic version (e.g., "1.0" -> "1.0.0")
@@ -7037,12 +7271,18 @@ class StorybookUI(QWidget):
 
     # --- Logs ---
     def toggle_logs(self):
-        # Keep window size stable; only toggle visibility
         self.logs_enabled = not self.logs_enabled
         self.log_container.setVisible(self.logs_enabled)
         self.btn_toggle_logs.setText(f"Logs: {'Enabled' if self.logs_enabled else 'Disabled'}")
+        if self.logs_enabled:
+            # Flush everything collected while the panel was hidden
+            self.log_area.setPlainText("\n".join(self._log_buffer))
+            self.log_area.verticalScrollBar().setValue(
+                self.log_area.verticalScrollBar().maximum()
+            )
 
     def log(self, s):
+        self._log_buffer.append(s)
         if self.logs_enabled:
             self.log_area.append(s)
         print(s)
@@ -8026,8 +8266,10 @@ class StorybookUI(QWidget):
                         attachments = {}
 
             # --- Determine if this mod should apply or restore based on dropdowns ---
+            # Any choice that isn't explicitly "Disabled" counts as active — this includes
+            # custom-named choices like "Iron Armor", "Gold Armor", etc.
             has_enabled_choice = any(
-                isinstance(v, str) and v.strip().lower() == "enabled"
+                isinstance(v, str) and v.strip().lower() != "disabled"
                 for v in (cfg or {}).values()
             )
             
@@ -8247,11 +8489,12 @@ class StorybookUI(QWidget):
                             self.log(f"[surgical] created {dst}")
                         touched.append(rel_dst.as_posix())
 
-            # --- Attachment handling (apply only for Enabled choices) ---
+            # --- Attachment handling (apply for any active/non-Disabled choice) ---
+            # This includes "Enabled" AND any custom choice like "Iron Armor", "Gold Armor", etc.
             for keyname, chosen in (cfg or {}).items():
                 if not isinstance(chosen, str) or not chosen:
                     continue
-                if chosen.strip().lower() != "enabled":
+                if chosen.strip().lower() == "disabled":
                     continue
                 
                 entry = attachments.get(keyname, {}).get(chosen, {})
@@ -8543,10 +8786,32 @@ class StorybookUI(QWidget):
             if dlg.exec_() == QDialog.Accepted:
                 vals = dlg.values()
                 cp, ini, _ = ensure_mod_ini(Path(m["path"]))
+                # Write kept fields
                 for k, v in vals.items():
                     cp.set(INI_SECTION, k, v)
+                # Remove deprecated fields from the INI if they exist
+                for dead_key in ("ID", "IncludeDirectories", "Dependencies"):
+                    if cp.has_option(INI_SECTION, dead_key):
+                        cp.remove_option(INI_SECTION, dead_key)
                 with ini.open("w", encoding="utf-8") as f:
                     cp.write(f)
+                # Also scrub from mod_data.json if present
+                try:
+                    data_file = Path(m["path"]) / "mod_data.json"
+                    if data_file.exists():
+                        data = json.loads(data_file.read_text(encoding="utf-8"))
+                        changed = False
+                        for dead_key in ("ID", "IncludeDirectories", "Dependencies"):
+                            if dead_key in data:
+                                del data[dead_key]
+                                changed = True
+                        if changed:
+                            data_file.write_text(
+                                json.dumps(data, indent=2, ensure_ascii=False),
+                                encoding="utf-8"
+                            )
+                except Exception:
+                    pass
                 self.load_game(self.current_game)
         except Exception as e:
             self.log(f"[error] edit mod: {e}")
@@ -8988,7 +9253,6 @@ class StorybookUI(QWidget):
         self._set_game_status_text(key, False)
 
         if self.settings.get("quit_dolphin_with_game", True):
-            # Close only the Dolphin processes we launched (leave unrelated instances alone)
             pids = getattr(self, "_launched_dolphin_pids", set()) or set()
             for pid in list(pids):
                 try:
@@ -8999,7 +9263,6 @@ class StorybookUI(QWidget):
                     )
                 except Exception:
                     pass
-            # Clear tracked list after closing
             self._launched_dolphin_pids = set()
 
         if hasattr(self, "_monitor") and self._monitor:
@@ -9301,6 +9564,9 @@ def main():
     # If this is the first run, show the welcome + settings wizard
     if first_run:
         QTimer.singleShot(100, lambda: show_first_run_wizard(ui))
+
+    # Run manager self-update check on boot (silent background fetch, popup if update found)
+    QTimer.singleShot(150, lambda: check_manager_update_on_boot(ui))
 
     # Run update check on startup if user enabled it
     try:
